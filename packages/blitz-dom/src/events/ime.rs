@@ -152,4 +152,16 @@ mod tests {
         ime(&mut doc, BlitzImeEvent::Disabled);
         assert_eq!(text(&doc, on), "fixed");
     }
+
+    #[test]
+    fn ime_disabled_clears_an_active_composition_on_a_disabled_input() {
+        let (mut doc, _, on) = make_doc();
+        assert!(doc.set_focus_to(on));
+        ime(&mut doc, BlitzImeEvent::Preedit("か".into(), None));
+        doc.mutate().set_attribute(on, qual_name!("disabled"), "");
+        assert!(text(&doc, on).contains('か'));
+        // No empty preedit first: IME Disabled alone ends the composition.
+        ime(&mut doc, BlitzImeEvent::Disabled);
+        assert_eq!(text(&doc, on), "fixed");
+    }
 }
