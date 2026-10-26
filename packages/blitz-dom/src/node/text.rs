@@ -212,11 +212,14 @@ impl TextInputData {
         layout_ctx: &mut LayoutContext<TextBrush>,
         shell_provider: &dyn ShellProvider,
         event: BlitzKeyEvent,
+        read_only: bool,
     ) -> Option<GeneratedTextInputEvent> {
         // Do nothing if it is a keyup event
         if !event.state.is_pressed() {
             return None;
         }
+        // A readonly input keeps its caret, selection and Copy, and a
+        // single-line one still submits; anything that edits is skipped.
 
         let mods = event.modifiers;
         let shift = mods.contains(Modifiers::SHIFT);
@@ -236,9 +239,13 @@ impl TextInputData {
                     "x" => {
                         if let Some(text) = driver.editor.selected_text() {
                             let _ = shell_provider.set_clipboard_text(text.to_owned());
+                            if read_only {
+                                return None;
+                            }
                             driver.delete_selection()
                         }
                     }
+                    "v" if read_only => return None,
                     "v" => {
                         let text = shell_provider.get_clipboard_text().unwrap_or_default();
                         driver.insert_or_replace_selection(&text)
@@ -328,6 +335,7 @@ impl TextInputData {
                 }
                 return Some(GeneratedTextInputEvent::Select);
             }
+            Key::Named(NamedKey::Delete) if read_only => {}
             Key::Named(NamedKey::Delete) => {
                 if action_mod {
                     driver.delete_word()
@@ -339,6 +347,8 @@ impl TextInputData {
 
             // On macOS this is handled by the apple standard keybindings
             #[cfg(not(target_os = "macos"))]
+            Key::Named(NamedKey::Backspace) if read_only => {}
+            #[cfg(not(target_os = "macos"))]
             Key::Named(NamedKey::Backspace) => {
                 if action_mod {
                     driver.backdelete_word()
@@ -349,7 +359,9 @@ impl TextInputData {
             }
 
             Key::Character(c) if c == "\n" => {
-                if is_multiline {
+                if is_multiline && read_only {
+                    return None;
+                } else if is_multiline {
                     driver.insert_or_replace_selection("\n");
                     return Some(GeneratedTextInputEvent::Input);
                 } else {
@@ -357,13 +369,16 @@ impl TextInputData {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                if is_multiline {
+                if is_multiline && read_only {
+                    return None;
+                } else if is_multiline {
                     driver.insert_or_replace_selection("\n");
                     return Some(GeneratedTextInputEvent::Input);
                 } else {
                     return Some(GeneratedTextInputEvent::Submit);
                 }
             }
+            Key::Character(_) if read_only => {}
             Key::Character(s)
                 if !mods.contains(Modifiers::CONTROL) && !mods.contains(Modifiers::META) =>
             {
@@ -382,7 +397,11 @@ impl TextInputData {
         layout_ctx: &mut LayoutContext<TextBrush>,
         shell_provider: &dyn ShellProvider,
         command: &str,
+        read_only: bool,
     ) -> Option<GeneratedTextInputEvent> {
+        if read_only && !keeps_text(command, self.is_multiline) {
+            return None;
+        }
         let editor = &mut self.editor;
         let mut driver = editor.driver(font_ctx, layout_ctx);
         let is_multiline = self.is_multiline;
@@ -808,4 +827,24 @@ impl TextInputData {
             }
         }
     }
+}
+
+/// Whether a macOS standard key binding leaves the text unchanged, so a
+/// readonly input still applies it: moving the caret, selecting,
+/// scrolling, and submitting a single-line input.
+fn keeps_text(command: &str, is_multiline: bool) -> bool {
+    command.starts_with("move")
+        || command.starts_with("select")
+        || command.starts_with("scroll")
+        || command.starts_with("page")
+        || matches!(
+            command,
+            "centerSelectionInVisibleArea:"
+                | "cancelOperation:"
+                | "setMark:"
+                | "swapWithMark:"
+                | "showContextMenuForSelection:"
+                | "quickLookPreviewItems:"
+        )
+        || (command == "insertNewline:" && !is_multiline)
 }

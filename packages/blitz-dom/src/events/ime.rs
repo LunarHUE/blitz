@@ -12,18 +12,19 @@ pub(crate) fn handle_ime_event<F: FnMut(DomEvent)>(
     if let Some(node_id) = doc.focus_node_id {
         let node = &mut doc.nodes[node_id];
         // IME text goes straight into the editor with no cancelable event
-        // first, so a disabled input, which script can still focus, must be
-        // skipped here. Clearing a composition is still applied, so one
-        // started before the input was disabled doesn't stay on screen.
-        let disabled = node
-            .element_data()
-            .is_some_and(|el| el.attr(local_name!("disabled")).is_some());
+        // first, so a disabled input, which script can still focus, and a
+        // readonly one, which anyone can focus, must be skipped here.
+        // Clearing a composition is still applied, so one started before
+        // the input was disabled or made readonly doesn't stay on screen.
+        let blocked = node.element_data().is_some_and(|el| {
+            el.attr(local_name!("disabled")).is_some() || el.attr(local_name!("readonly")).is_some()
+        });
         let clears = match &event {
             BlitzImeEvent::Disabled => true,
             BlitzImeEvent::Preedit(text, _) => text.is_empty(),
             _ => false,
         };
-        if disabled && !clears {
+        if blocked && !clears {
             return;
         }
         let text_input_data = node
