@@ -1065,4 +1065,30 @@ mod secret_tests {
             "it is laid out"
         );
     }
+
+    #[test]
+    fn password_to_upper_case_password_never_unmasks_or_copies() {
+        // The review's exact repro: type=password with hunter2.
+        let mut d = make();
+        let input = d.input;
+        d.doc
+            .mutate()
+            .set_attribute(input, qual_name!("value"), "hunter2");
+        *d.clip.0.lock().unwrap() = "sentinel".into();
+        d.action("a");
+        assert_eq!(d.action("c"), 0);
+        assert_eq!(*d.clip.0.lock().unwrap(), "sentinel");
+        // password -> PASSWORD, with no text type in between.
+        d.doc
+            .mutate()
+            .set_attribute(input, qual_name!("type"), "PASSWORD");
+        d.doc.resolve(0.0);
+        assert!(d.doc.set_focus_to(input) || d.doc.focus_node_id == Some(input));
+        assert!(d.masked(7), "{:?}", d.shown());
+        d.action("a");
+        assert_eq!(d.action("c"), 0);
+        assert_eq!(d.action("x"), 0);
+        assert_eq!(*d.clip.0.lock().unwrap(), "sentinel");
+        assert_eq!(d.value(), "hunter2");
+    }
 }
