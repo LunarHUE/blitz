@@ -473,7 +473,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             None,
         );
 
-        cx.draw_outline(scene);
         cx.draw_outset_box_shadow(scene);
 
         // clip-path clip ayer
@@ -510,6 +509,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     .unwrap_or(Rect::ZERO);
 
                 let mut effect_layer_clip = cx.frame.border_box_path().bounding_box();
+                // The outline is part of the element's rendering, so opacity
+                // and filters apply to it; the layer must not clip it away.
+                if let Some(outline) = cx.outline_bounds() {
+                    effect_layer_clip = effect_layer_clip.union(outline);
+                }
                 effect_layer_clip.x0 += filter_expansion_area.x0;
                 effect_layer_clip.y0 += filter_expansion_area.y0;
                 effect_layer_clip.x1 += filter_expansion_area.x1;
@@ -581,6 +585,16 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             cx.transform = unscrolled_transform;
                             cx.draw_scrollbars(scene);
                         }
+
+                        // Outlines paint over the element's background and
+                        // content, as in CSS 2 Appendix E, so one pulled
+                        // inside by a negative `outline-offset` stays
+                        // visible, and inside this layer, so the element's
+                        // opacity and filters apply to it. This is still
+                        // before later siblings, where a browser paints them
+                        // after the whole stacking context.
+                        cx.transform = unscrolled_transform;
+                        cx.draw_outline(scene);
                     },
                 );
 

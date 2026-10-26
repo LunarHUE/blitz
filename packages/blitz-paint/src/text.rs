@@ -94,6 +94,72 @@ fn win_ascent_ratio(font: &parley::FontData) -> Option<f32> {
     Some(win_ascent as f32 / units_per_em as f32)
 }
 
+/// The faux bold blitz-paint draws for a glyph run, as outline expansion per
+/// side in font units, or `None` when it draws none. `node_id` is the run's
+/// node, whose computed `font-synthesis-weight` can forbid it.
+///
+/// It draws faux bold when the matched face cannot reach the requested
+/// weight: when fontique suggests it (a gap over 200), and, as Blink does,
+/// when 600 or more is asked of a face lighter than 600 without a `wght`
+/// axis. Stylo's servo build has no `font-synthesis-style`, so faux italic
+/// cannot be turned off the same way.
+pub fn synthetic_bold(
+    doc: &BaseDocument,
+    node_id: NodeId,
+    run: &parley::Run<'_, blitz_dom::node::TextBrush>,
+) -> Option<kurbo::Vec2> {
+    use style::values::specified::font::FontSynthesis;
+    let forbidden = doc
+        .get_node(node_id)
+        .and_then(|node| node.primary_styles())
+        .is_some_and(|style| style.get_font().font_synthesis_weight == FontSynthesis::None);
+    if forbidden {
+        return None;
+    }
+    let font = run.font();
+    let wanted = run.synthesis().embolden()
+        || (run.font_attrs().weight.value() >= 600.0 && static_weight(font) < 600.0);
+    wanted.then(|| synthetic_bold_amount(font))
+}
+
+/// The OS/2 weight of a face without a `wght` axis, or `f32::MAX` for a
+/// variable face, which reaches its weights through the axis.
+fn static_weight(font: &parley::FontData) -> f32 {
+    use skrifa::raw::{FontRef, TableProvider as _};
+    let Ok(face) = FontRef::from_index(font.data.as_ref(), font.index) else {
+        return f32::MAX;
+    };
+    let has_wght = face
+        .fvar()
+        .ok()
+        .and_then(|f| f.axes().ok())
+        .is_some_and(|axes| {
+            axes.iter()
+                .any(|a| a.axis_tag() == skrifa::raw::types::Tag::new(b"wght"))
+        });
+    if has_wght {
+        return f32::MAX;
+    }
+    face.os2()
+        .map_or(400.0, |os2| f32::from(os2.us_weight_class()))
+}
+
+/// Outline expansion per side for a run Parley marked for faux bold.
+///
+/// Chromium's FreeType path (Skia's `emboldenOutline`) widens each glyph by
+/// `ppem / 24` in total, so each side grows by `ppem / 48`. Firefox uses a
+/// similar strength. Unhinted glyph runs draw outlines at units-per-em size
+/// before scaling, so the expansion is given in font units: `upem / 48`,
+/// which is `ppem / 48` pixels at any size.
+fn synthetic_bold_amount(font: &parley::FontData) -> kurbo::Vec2 {
+    use skrifa::raw::{FontRef, TableProvider as _};
+    let upem = FontRef::from_index(font.data.as_ref(), font.index)
+        .ok()
+        .and_then(|f| f.head().ok())
+        .map_or(1000.0, |head| head.units_per_em() as f64);
+    kurbo::Vec2::new(upem / 48.0, upem / 48.0)
+}
+
 /// Mirrors Blink's `SelectBestDashGap`: choose the gap length (as close as possible to
 /// `gap_length`) that fits a whole number of `dash_length` dashes across `stroke_length`,
 /// so dashes are evenly distributed and a dash lands at each end of the line.
@@ -603,9 +669,16 @@ pub(crate) fn stroke_text<'a>(
                 let metrics = run.font_metrics();
                 let style = glyph_run.style();
                 let synthesis = run.synthesis();
-                let glyph_xform = synthesis
-                    .skew()
-                    .map(|angle| Affine::skew(angle.to_radians().tan() as f64, 0.0));
+                // Faux italic. anyrender_vello_cpu 0.18 drops a per-glyph
+                // transform, so the run's transform carries the slant instead,
+                // pivoting on the baseline every glyph in the run sits on. The
+                // top leans right, as browsers draw it.
+                let glyph_xform = synthesis.skew().map(|angle| {
+                    let baseline = glyph_run.baseline() as f64;
+                    Affine::translate((0.0, baseline))
+                        * Affine::skew(-(angle.to_radians().tan() as f64), 0.0)
+                        * Affine::translate((0.0, -baseline))
+                });
 
                 let css_font_size = font_size as f64 / scale;
 
@@ -637,7 +710,11 @@ pub(crate) fn stroke_text<'a>(
                 // inherits, so the innermost inline element already carries the right value.
                 let text_color = stack.last().map(|e| e.text_color).unwrap_or(Color::BLACK);
 
-                let embolden = if FONT_EMBOLDEN_ENABLED {
+                let bold = synthetic_bold(doc, style.brush.id, run);
+                let synthetic_bold = bold.is_some();
+                let embolden = if let Some(amount) = bold {
+                    amount
+                } else if FONT_EMBOLDEN_ENABLED {
                     let fs = font_size as f64 / scale;
                     kurbo::Vec2::new((0.015125 * fs).min(0.3), (0.0121 * fs).min(0.3))
                 } else {
@@ -648,14 +725,16 @@ pub(crate) fn stroke_text<'a>(
                 scene.draw_glyphs(
                     font,
                     font_size,
-                    !FONT_EMBOLDEN_ENABLED, // hint
+                    // Emboldened runs stay unhinted so the amount is in font units.
+                    // Skewed runs stay unhinted too, as hinting assumes no skew.
+                    !(FONT_EMBOLDEN_ENABLED || synthetic_bold || glyph_xform.is_some()), // hint
                     normalized_coords,
                     embolden,
                     Fill::NonZero,
                     &anyrender::Paint::from(text_color),
                     1.0, // alpha
-                    transform,
-                    glyph_xform,
+                    glyph_xform.map_or(transform, |skew| transform * skew),
+                    None,
                     glyph_run.positioned_glyphs().map(|glyph| anyrender::Glyph {
                         id: glyph.id as _,
                         x: glyph.x,

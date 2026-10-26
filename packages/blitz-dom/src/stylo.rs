@@ -474,8 +474,14 @@ impl selectors::Element for BlitzNode<'_> {
             NonTSPseudoClass::Disabled => self.element_state().contains(ElementState::DISABLED),
             NonTSPseudoClass::Enabled => self.element_state().contains(ElementState::ENABLED),
             NonTSPseudoClass::Focus => self.element_state().contains(ElementState::FOCUS),
-            NonTSPseudoClass::FocusWithin => false,
-            NonTSPseudoClass::FocusVisible => false,
+            NonTSPseudoClass::FocusWithin => {
+                self.element_state().contains(ElementState::FOCUS_WITHIN)
+            }
+            // Blitz sets FOCUSRING with every focus, so this matches pointer
+            // focus too, where browsers usually leave the ring off.
+            NonTSPseudoClass::FocusVisible => {
+                self.element_state().contains(ElementState::FOCUSRING)
+            }
             NonTSPseudoClass::Fullscreen => false,
             NonTSPseudoClass::Hover => self.element_state().contains(ElementState::HOVER),
             NonTSPseudoClass::Indeterminate => false,
@@ -1114,6 +1120,15 @@ impl<'a> TElement for BlitzNode<'a> {
                     } else {
                         PropertyDeclaration::Height(size)
                     });
+                }
+            }
+
+            // `font-size` is a presentation attribute too. Only the `<svg>`
+            // element is styled by Stylo; usvg handles it on descendants.
+            #[cfg(feature = "svg")]
+            if *tag == local_name!("svg") && *name == local_name!("font-size") {
+                if let Some(declaration) = crate::util::parse_svg_font_size_attr(value) {
+                    push_style(declaration);
                 }
             }
 

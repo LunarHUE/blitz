@@ -100,15 +100,32 @@ pub(crate) fn font_style(input: stylo::FontStyle) -> parley::FontStyle {
     }
 }
 
-pub(crate) fn font_variations(input: &stylo::FontVariationSettings) -> Vec<parley::FontVariation> {
-    input
+/// Converts `font-variation-settings` for a font with the given computed
+/// `font-optical-sizing` and size in CSS pixels. Under `auto`, the initial
+/// value, `opsz` follows the font size as in browsers, unless the settings
+/// name `opsz` themselves. Fonts without an `opsz` axis ignore the value.
+pub(crate) fn font_variations(
+    input: &stylo::FontVariationSettings,
+    optical_sizing: style::computed_values::font_optical_sizing::T,
+    font_size: f32,
+) -> Vec<parley::FontVariation> {
+    use style::computed_values::font_optical_sizing::T as OpticalSizing;
+    const OPSZ: parley::Tag = parley::Tag::new(b"opsz");
+    let mut variations: Vec<_> = input
         .0
         .iter()
         .map(|v| parley::FontVariation {
             tag: parley::Tag::from_bytes(v.tag.0.to_be_bytes()),
             value: v.value,
         })
-        .collect()
+        .collect();
+    if optical_sizing == OpticalSizing::Auto && !variations.iter().any(|v| v.tag == OPSZ) {
+        variations.push(parley::FontVariation {
+            tag: OPSZ,
+            value: font_size,
+        });
+    }
+    variations
 }
 
 #[inline]
@@ -427,7 +444,11 @@ pub(crate) fn style(
     let font_weight = self::font_weight(font_styles.font_weight);
     let font_style = self::font_style(font_styles.font_style);
     let font_width = self::font_width(font_styles.font_width);
-    let font_variations = self::font_variations(&font_styles.font_variation_settings);
+    let font_variations = self::font_variations(
+        &font_styles.font_variation_settings,
+        font_styles.font_optical_sizing,
+        font_size,
+    );
     let font_features = self::font_features(font_styles);
 
     // Convert font family

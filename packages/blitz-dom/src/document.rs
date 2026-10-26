@@ -298,6 +298,9 @@ pub struct BaseDocument {
     pub(crate) last_client_pointer_position: Option<taffy::Point<f32>>,
     /// The node which is currently focussed (if any)
     pub(crate) focus_node_id: Option<NodeId>,
+    /// The elements carrying `:focus-within`: the focused node and its
+    /// ancestors as of the last [`Self::sync_focus_within`].
+    pub(crate) focus_within_chain: Vec<NodeId>,
     /// The node which is currently active (if any)
     pub(crate) active_node_id: Option<NodeId>,
     /// The node which recieved a mousedown event (if any)
@@ -499,6 +502,7 @@ impl BaseDocument {
             hover_node_is_text: false,
             last_client_pointer_position: None,
             focus_node_id: None,
+            focus_within_chain: Vec::new(),
             active_node_id: None,
             mousedown_node_id: None,
             has_active_animations: false,
@@ -946,6 +950,9 @@ impl BaseDocument {
             let shell_provider = self.shell_provider.clone();
             self.nodes[node_id].blur(shell_provider);
             self.focus_node_id = None;
+            // Runs before the node leaves its parent, so the ancestors that
+            // stay in the document lose :focus-within too.
+            self.sync_focus_within();
         }
         if self.mousedown_node_id == Some(node_id) {
             self.mousedown_node_id = None;
@@ -1691,7 +1698,48 @@ impl BaseDocument {
                 node.blur(shell_provider)
             });
             self.focus_node_id = None;
+            self.sync_focus_within();
         }
+    }
+
+    /// Makes `:focus-within` hold exactly on the focused node and its
+    /// current ancestors. Call after focus changes and after the tree
+    /// changes, since moving the focused node, or a subtree holding it,
+    /// changes its ancestors without changing focus.
+    pub(crate) fn sync_focus_within(&mut self) {
+        let mut chain = Vec::new();
+        let mut next = self.focus_node_id;
+        // `get` because a removal may already have freed a slot.
+        while let Some(node) = next.and_then(|id| self.nodes.get(id)) {
+            if node.element_data().is_some() {
+                chain.push(node.id);
+            }
+            next = node.parent;
+        }
+        let old = std::mem::take(&mut self.focus_within_chain);
+        for &id in old.iter().filter(|id| !chain.contains(id)) {
+            self.set_focus_within_flag(id, false);
+        }
+        for &id in chain.iter().filter(|id| !old.contains(id)) {
+            self.set_focus_within_flag(id, true);
+        }
+        self.focus_within_chain = chain;
+    }
+
+    fn set_focus_within_flag(&mut self, id: NodeId, on: bool) {
+        if self
+            .nodes
+            .get(id)
+            .is_none_or(|node| node.element_data().is_none())
+        {
+            return;
+        }
+        self.snapshot_node_and(id, ElementState::FOCUS_WITHIN, |node| {
+            if let Some(data) = node.element_data_mut() {
+                data.element_state.set(ElementState::FOCUS_WITHIN, on);
+            }
+            node.mark_ancestors_dirty();
+        });
     }
 
     pub fn set_mousedown_node_id(&mut self, node_id: Option<NodeId>) {
@@ -1723,8 +1771,8 @@ impl BaseDocument {
             ElementState::FOCUS | ElementState::FOCUSRING,
             |node| node.focus(shell_provider),
         );
-
         self.focus_node_id = Some(focus_node_id);
+        self.sync_focus_within();
 
         true
     }
@@ -3372,6 +3420,266 @@ mod font_face_override_tests {
             resolved_name, ALIAS,
             "registered family should report the CSS-declared name, \
              not the font file's internal `name` table entry",
+        );
+    }
+}
+
+#[cfg(test)]
+mod focus_state_tests {
+    use super::*;
+    use crate::{Attribute, qual_name};
+    use blitz_traits::shell::ColorScheme;
+
+    struct Ids {
+        html: NodeId,
+        body: NodeId,
+        section: NodeId,
+        input: NodeId,
+        /// An empty sibling of `section`, to move things into.
+        other: NodeId,
+    }
+
+    /// `<html><body><section><input></section></body></html>` with rules
+    /// for `section:focus-within` and `input:focus-visible`.
+    fn make_doc() -> (BaseDocument, Ids) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        doc.add_user_agent_stylesheet(UserAgentStylesheet::parse(
+            "section:focus-within { background-color: rgb(255, 0, 0); } \
+             input:focus-visible { color: rgb(0, 0, 255); }",
+        ));
+        let root_id = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![]);
+        let section = m.create_element(qual_name!("section"), vec![]);
+        let input = m.create_element(
+            qual_name!("input"),
+            vec![Attribute {
+                name: qual_name!("type"),
+                value: "text".into(),
+            }],
+        );
+        let other = m.create_element(qual_name!("section"), vec![]);
+        m.append_children(section, &[input]);
+        m.append_children(body, &[section, other]);
+        m.append_children(html, &[body]);
+        m.append_children(root_id, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        (
+            doc,
+            Ids {
+                html,
+                body,
+                section,
+                input,
+                other,
+            },
+        )
+    }
+
+    fn focus_within(doc: &BaseDocument, id: NodeId) -> bool {
+        doc.nodes[id]
+            .element_data()
+            .unwrap()
+            .element_state
+            .contains(ElementState::FOCUS_WITHIN)
+    }
+
+    #[test]
+    fn focus_within_and_focus_visible_follow_focus() {
+        let (mut doc, ids) = make_doc();
+        let bg = |doc: &BaseDocument| {
+            format!(
+                "{:?}",
+                doc.nodes[ids.section]
+                    .primary_styles()
+                    .unwrap()
+                    .get_background()
+                    .background_color
+            )
+        };
+        let color = |doc: &BaseDocument| {
+            format!(
+                "{:?}",
+                doc.nodes[ids.input].primary_styles().unwrap().clone_color()
+            )
+        };
+        let (bg0, color0) = (bg(&doc), color(&doc));
+
+        assert!(doc.set_focus_to(ids.input));
+        doc.resolve(0.0);
+        for id in [ids.html, ids.body, ids.section, ids.input] {
+            assert!(focus_within(&doc, id), "{id}");
+        }
+        assert_ne!(bg(&doc), bg0, ":focus-within should match the section");
+        assert_ne!(color(&doc), color0, ":focus-visible should match the input");
+
+        // Moving focus to the section clears the input but keeps ancestors.
+        assert!(doc.set_focus_to(ids.section));
+        doc.resolve(0.0);
+        assert!(!focus_within(&doc, ids.input));
+        assert!(focus_within(&doc, ids.section) && focus_within(&doc, ids.body));
+        assert_eq!(color(&doc), color0, "blur should clear :focus-visible");
+
+        doc.clear_focus();
+        doc.resolve(0.0);
+        for id in [ids.html, ids.body, ids.section, ids.input] {
+            assert!(!focus_within(&doc, id), "{id}");
+        }
+        assert_eq!(bg(&doc), bg0, "blur should clear :focus-within");
+    }
+
+    #[test]
+    fn dropping_the_focused_node_clears_focus_within_on_ancestors() {
+        let (mut doc, ids) = make_doc();
+        doc.set_focus_to(ids.input);
+        doc.mutate().remove_and_drop_node(ids.input);
+        doc.resolve(0.0);
+        assert_eq!(doc.focus_node_id, None);
+        for id in [ids.html, ids.body, ids.section] {
+            assert!(!focus_within(&doc, id), "{id}");
+        }
+        doc.clear_focus();
+    }
+
+    #[test]
+    fn dropping_an_ancestor_of_the_focused_node_clears_the_rest() {
+        let (mut doc, ids) = make_doc();
+        doc.set_focus_to(ids.input);
+        doc.mutate().remove_and_drop_node(ids.section);
+        doc.resolve(0.0);
+        assert_eq!(doc.focus_node_id, None);
+        for id in [ids.html, ids.body] {
+            assert!(!focus_within(&doc, id), "{id}");
+        }
+    }
+
+    #[test]
+    fn detaching_the_focused_node_clears_focus_within_on_old_ancestors() {
+        let (mut doc, ids) = make_doc();
+        doc.set_focus_to(ids.input);
+        doc.mutate().remove_node(ids.input);
+        doc.resolve(0.0);
+        assert_eq!(doc.focus_node_id, None);
+        for id in [ids.html, ids.body, ids.section] {
+            assert!(!focus_within(&doc, id), "{id}");
+        }
+    }
+
+    fn marked(doc: &BaseDocument, ids: &Ids) -> Vec<&'static str> {
+        [
+            ("html", ids.html),
+            ("body", ids.body),
+            ("section", ids.section),
+            ("input", ids.input),
+            ("other", ids.other),
+        ]
+        .into_iter()
+        .filter(|(_, id)| doc.nodes.get(*id).is_some() && focus_within(doc, *id))
+        .map(|(name, _)| name)
+        .collect()
+    }
+
+    #[test]
+    fn moving_the_focused_node_moves_focus_within() {
+        let (mut doc, ids) = make_doc();
+        doc.set_focus_to(ids.input);
+        doc.mutate().append_children(ids.other, &[ids.input]);
+        doc.resolve(0.0);
+        assert_eq!(doc.focus_node_id, Some(ids.input));
+        assert_eq!(marked(&doc, &ids), ["html", "body", "input", "other"]);
+
+        // Removing the new parent clears everything the input marked.
+        doc.mutate().remove_and_drop_node(ids.other);
+        doc.resolve(0.0);
+        assert_eq!(doc.focus_node_id, None);
+        assert!(marked(&doc, &ids).is_empty(), "{:?}", marked(&doc, &ids));
+    }
+
+    #[test]
+    fn moving_a_subtree_holding_focus_keeps_common_ancestors() {
+        let (mut doc, ids) = make_doc();
+        doc.set_focus_to(ids.input);
+        // section (with the input) moves under its sibling.
+        doc.mutate().append_children(ids.other, &[ids.section]);
+        doc.resolve(0.0);
+        assert_eq!(
+            marked(&doc, &ids),
+            ["html", "body", "section", "input", "other"]
+        );
+
+        // Detaching the focused input from there clears the whole chain.
+        doc.mutate().remove_node(ids.input);
+        doc.resolve(0.0);
+        assert_eq!(doc.focus_node_id, None);
+        assert!(marked(&doc, &ids).is_empty(), "{:?}", marked(&doc, &ids));
+    }
+}
+
+#[cfg(test)]
+mod optical_sizing_tests {
+    use super::*;
+    use crate::{Attribute, qual_name};
+    use blitz_traits::shell::ColorScheme;
+
+    /// The `opsz` Parley gets for a span inside a div styled with `css`.
+    fn span_opsz(css: &str, span_css: &str) -> Option<f32> {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let style = |value: &str| Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        };
+        let root_id = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![]);
+        let div = m.create_element(qual_name!("div"), vec![style(css)]);
+        let span = m.create_element(qual_name!("span"), vec![style(span_css)]);
+        let text = m.create_text_node("x");
+        m.append_children(span, &[text]);
+        m.append_children(div, &[span]);
+        m.append_children(body, &[div]);
+        m.append_children(html, &[body]);
+        m.append_children(root_id, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        let styles = doc.nodes[span].primary_styles().unwrap();
+        let parley::FontVariations::List(list) =
+            crate::stylo_to_parley::style(span, &styles).font_variations
+        else {
+            panic!("expected a list");
+        };
+        list.iter()
+            .find(|v| v.tag == crate::stylo_to_parley::parley::Tag::new(b"opsz"))
+            .map(|v| v.value)
+    }
+
+    #[test]
+    fn opsz_follows_font_optical_sizing() {
+        assert_eq!(span_opsz("font-size: 32px", ""), Some(32.0));
+        // `none` inherits, so the span gets no automatic opsz.
+        assert_eq!(
+            span_opsz("font-size: 32px; font-optical-sizing: none", ""),
+            None
+        );
+        assert_eq!(
+            span_opsz(
+                "font-size: 32px; font-optical-sizing: none",
+                "font-optical-sizing: auto"
+            ),
+            Some(32.0)
+        );
+        // An explicit setting wins over the automatic one.
+        assert_eq!(
+            span_opsz("font-size: 32px", "font-variation-settings: 'opsz' 14"),
+            Some(14.0)
         );
     }
 }

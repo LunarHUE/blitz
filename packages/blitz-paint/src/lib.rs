@@ -13,6 +13,8 @@ mod render;
 mod sizing;
 mod text;
 
+pub use text::synthetic_bold;
+
 use std::collections::HashMap;
 
 use anyrender::{PaintScene, Scene};

@@ -13,11 +13,18 @@ use crate::util::ACTION_MOD;
 pub struct TextBrush {
     /// The node id for the span
     pub id: NodeId,
+    /// The node whose computed style governs the text's white space:
+    /// usually `id`, but a `display: contents` element inside the span,
+    /// which has no span of its own, still sets `white-space` for its text.
+    pub white_space_node: NodeId,
 }
 
 impl TextBrush {
     pub(crate) fn from_id(id: NodeId) -> Self {
-        Self { id }
+        Self {
+            id,
+            white_space_node: id,
+        }
     }
 }
 

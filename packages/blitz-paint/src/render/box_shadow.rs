@@ -78,8 +78,11 @@ impl ElementCx<'_, '_> {
                         let radius = self.frame.border_radii.average();
                         let rect = self.frame.border_box.inflate(spread, spread);
 
-                        // Fill the color
-                        scene.draw_box_shadow(transform, rect, shadow_color, radius, blur);
+                        // CSS defines the blur as twice the Gaussian's standard
+                        // deviation (css-backgrounds-3, "shadow blur"), and the
+                        // scene takes device pixels.
+                        let std_dev = blur * self.scale / 2.0;
+                        scene.draw_box_shadow(transform, rect, shadow_color, radius, std_dev);
                     }
                 }
             },
@@ -147,7 +150,8 @@ impl ElementCx<'_, '_> {
                 hole,
                 Color::WHITE,
                 radius,
-                shadow.base.blur.px() as f64 * self.scale,
+                // Standard deviation is half the CSS blur radius.
+                shadow.base.blur.px() as f64 * self.scale / 2.0,
             );
 
             scene.pop_layer();

@@ -197,6 +197,22 @@ fn push_children_and_pseudos(layout_children: &mut ThinVec<NodeId>, node: &Node)
     }
 }
 
+/// The nearest ancestor of `node_id` that is not `display: contents`, whose
+/// span the text of a contents element is painted with.
+fn nearest_boxed_ancestor(nodes: &crate::NodeTree, node_id: NodeId) -> NodeId {
+    let mut id = node_id;
+    while let Some(parent) = nodes[id].parent {
+        id = parent;
+        let contents = nodes[id]
+            .display_style()
+            .is_some_and(|d| matches!(d.inside(), DisplayInside::Contents));
+        if !contents {
+            break;
+        }
+    }
+    id
+}
+
 /// Wrapping policy of the nearest non-contents ancestor container. Children
 /// hoisted out of display:contents nodes must be wrapped in anonymous blocks
 /// exactly as if they were direct children of that container: without this,
@@ -459,14 +475,23 @@ fn collect_layout_children_with_wrap(
 
         #[cfg(feature = "svg")]
         if matches!(tag_name, "svg") {
-            let outer_html = doc.get_node(container_node_id).unwrap().svg_source();
+            // `em` lengths inside the SVG resolve against the root's computed size.
+            let font_size = doc.nodes[container_node_id]
+                .primary_styles()
+                .map_or(crate::util::SVG_IMAGE_FONT_SIZE, |style| {
+                    style.get_font().font_size.used_size.0.px()
+                });
+            let outer_html = doc
+                .get_node(container_node_id)
+                .unwrap()
+                .svg_source(font_size);
 
             // Remove contruction damage from subtree
             doc.iter_subtree_mut(container_node_id, |id: NodeId, doc: &mut BaseDocument| {
                 doc.nodes[id].remove_damage(CONSTRUCT_BOX | CONSTRUCT_DESCENDENT | CONSTRUCT_FC);
             });
 
-            match crate::util::parse_svg_image(outer_html.as_bytes()) {
+            match crate::util::parse_svg_image(outer_html.as_bytes(), font_size, None) {
                 Ok(svg) => {
                     doc.get_node_mut(container_node_id)
                         .unwrap()
@@ -1170,8 +1195,15 @@ pub(crate) fn build_inline_layout_into(
                         // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                     }
                     (DisplayOutside::None, DisplayInside::Contents) => {
+                        // Paint keeps the brush of the nearest element with a
+                        // box; white space follows this element's style.
+                        let brush = TextBrush {
+                            id: nearest_boxed_ancestor(nodes, node_id),
+                            white_space_node: node_id,
+                        };
                         let whitespace = style.map(|s| {
                             [
+                                parley::StyleProperty::Brush(brush),
                                 parley::StyleProperty::WhiteSpaceCollapse(
                                     stylo_to_parley::white_space_collapse(
                                         s.clone_white_space_collapse(),
@@ -1310,5 +1342,492 @@ pub(crate) fn build_inline_layout_into(
             }
             NodeData::Document(_) => unreachable!(),
         }
+    }
+}
+
+#[cfg(all(test, feature = "svg"))]
+mod inline_svg_font_size_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, UserAgentStylesheet, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+    use markup5ever::{LocalName, QualName, ns};
+
+    /// The stroke width usvg parsed for `stroke-width="0.1em"` on a path
+    /// inside an `<svg>` with `svg_attrs`, under a 20px div.
+    fn stroke_width(svg_attrs: &[(&str, &str)], sheet: &str) -> f32 {
+        stroke_width_with(svg_attrs, sheet, "")
+    }
+
+    /// As [`stroke_width`], with `embedded` as a `<style>` inside the svg.
+    fn stroke_width_with(svg_attrs: &[(&str, &str)], sheet: &str, embedded: &str) -> f32 {
+        stroke_width_nested(svg_attrs, sheet, embedded, None)
+    }
+
+    /// As [`stroke_width_with`], with the path inside a nested `<svg>` with
+    /// `nested` attributes when given.
+    fn stroke_width_nested(
+        svg_attrs: &[(&str, &str)],
+        sheet: &str,
+        embedded: &str,
+        nested: Option<&[(&str, &str)]>,
+    ) -> f32 {
+        with_tree(svg_attrs, sheet, embedded, nested, &[], |tree| {
+            fn find(group: &usvg::Group) -> Option<f32> {
+                group.children().iter().find_map(|node| match node {
+                    usvg::Node::Path(p) => p.stroke().map(|s| s.width().get()),
+                    usvg::Node::Group(g) => find(g),
+                    _ => None,
+                })
+            }
+            find(tree.root()).expect("a stroked path")
+        })
+    }
+
+    /// Builds the test document and hands `inspect` the svg's usvg tree.
+    /// `path_attrs` go on the path; a `<text>` sits next to it.
+    fn with_tree<R>(
+        svg_attrs: &[(&str, &str)],
+        sheet: &str,
+        embedded: &str,
+        nested: Option<&[(&str, &str)]>,
+        path_attrs: &[(&str, &str)],
+        inspect: impl FnOnce(&usvg::Tree) -> R,
+    ) -> R {
+        let (doc, svg) = build_doc(svg_attrs, sheet, embedded, nested, path_attrs);
+        let tree = doc.nodes[svg]
+            .element_data()
+            .unwrap()
+            .svg_data()
+            .expect("parsed svg");
+        inspect(tree)
+    }
+
+    fn build_doc(
+        svg_attrs: &[(&str, &str)],
+        sheet: &str,
+        embedded: &str,
+        nested: Option<&[(&str, &str)]>,
+        path_attrs: &[(&str, &str)],
+    ) -> (BaseDocument, crate::NodeId) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        if !sheet.is_empty() {
+            doc.add_user_agent_stylesheet(UserAgentStylesheet::parse(sheet));
+        }
+        let attr = |k: &str, v: &str| Attribute {
+            name: QualName::new(None, ns!(), LocalName::from(k)),
+            value: v.to_owned(),
+        };
+        let svg_name = |t: &str| QualName::new(None, ns!(svg), LocalName::from(t));
+        let root_id = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![]);
+        let div = m.create_element(qual_name!("div"), vec![attr("style", "font-size: 20px")]);
+        let mut attrs = vec![
+            attr("viewBox", "0 0 100 100"),
+            attr("width", "100px"),
+            attr("height", "100px"),
+        ];
+        attrs.extend(svg_attrs.iter().map(|(k, v)| attr(k, v)));
+        let svg = m.create_element(svg_name("svg"), attrs);
+        let path = m.create_element(
+            svg_name("path"),
+            vec![
+                attr("d", "M0 50 L100 50"),
+                attr("stroke", "black"),
+                attr("stroke-width", "0.1em"),
+            ]
+            .into_iter()
+            .chain(path_attrs.iter().map(|(k, v)| attr(k, v)))
+            .collect(),
+        );
+        let text = m.create_element(svg_name("text"), vec![attr("y", "40")]);
+        let glyphs = m.create_text_node("Ag");
+        m.append_children(text, &[glyphs]);
+        match nested {
+            Some(nested_attrs) => {
+                let mut attrs = vec![attr("width", "100"), attr("height", "100")];
+                attrs.extend(nested_attrs.iter().map(|(k, v)| attr(k, v)));
+                let inner = m.create_element(svg_name("svg"), attrs);
+                m.append_children(inner, &[path, text]);
+                m.append_children(svg, &[inner]);
+            }
+            None => m.append_children(svg, &[path, text]),
+        }
+        if !embedded.is_empty() {
+            let style = m.create_element(svg_name("style"), vec![]);
+            let css = m.create_text_node(embedded);
+            m.append_children(style, &[css]);
+            let first = m.child_ids(svg)[0];
+            m.insert_nodes_before(first, &[style]);
+        }
+        m.append_children(div, &[svg]);
+        m.append_children(body, &[div]);
+        m.append_children(html, &[body]);
+        m.append_children(root_id, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        (doc, svg)
+    }
+
+    /// The font weight, italic-ness and size usvg resolved for the `<text>`.
+    /// usvg keeps a text node only when its font database has a face for
+    /// it, so this parses the source Blitz serializes with a database that
+    /// holds Blitz's bullet font as every generic family.
+    fn text_font(
+        svg_attrs: &[(&str, &str)],
+        embedded: &str,
+        nested: Option<&[(&str, &str)]>,
+    ) -> (u16, bool, f32) {
+        let (doc, svg) = build_doc(svg_attrs, "", embedded, nested, &[]);
+        let node = &doc.nodes[svg];
+        let size = node
+            .primary_styles()
+            .unwrap()
+            .get_font()
+            .font_size
+            .used_size
+            .0
+            .px();
+        let source = node.svg_source(size);
+        let mut db = usvg::fontdb::Database::new();
+        db.load_font_data(crate::BULLET_FONT.to_vec());
+        let family = db.faces().next().unwrap().families[0].0.clone();
+        db.set_serif_family(&family);
+        db.set_sans_serif_family(&family);
+        let options = usvg::Options {
+            fontdb: std::sync::Arc::new(db),
+            font_size: size,
+            font_family: family,
+            ..Default::default()
+        };
+        let tree = usvg::Tree::from_str(&source, &options).expect("parsed svg");
+        {
+            let tree = &tree;
+            fn find(group: &usvg::Group) -> Option<(u16, bool, f32)> {
+                group.children().iter().find_map(|node| match node {
+                    usvg::Node::Text(t) => t.chunks().first()?.spans().first().map(|span| {
+                        (
+                            span.font().weight(),
+                            span.font().style() != usvg::FontStyle::Normal,
+                            span.font_size().get(),
+                        )
+                    }),
+                    usvg::Node::Group(g) => find(g),
+                    _ => None,
+                })
+            }
+            find(tree.root()).expect("a text node")
+        }
+    }
+
+    #[test]
+    fn rules_that_do_not_touch_the_root_size_are_copied_as_written() {
+        let stroke = |label: &str, embedded: &str| {
+            with_tree(&[], "", embedded, None, &[("data-label", label)], |tree| {
+                tree.root().children().iter().find_map(|node| match node {
+                    usvg::Node::Path(p) => p.stroke().map(|s| s.width().get()),
+                    _ => None,
+                })
+            })
+        };
+        // Each selector must match exactly when it does in the untouched
+        // sheet. A root font rule in the same sheet forces the rewrite;
+        // unmatched, the 0.1em stroke is 2 without it and 4 with it.
+        let root_rule = "svg { font: 2em serif; } ";
+        for (label, rule, px) in [
+            ("it's", r#"[data-label="it's"] { stroke-width: 9px; }"#, 9.0),
+            ("a\"b", r#"[data-label="a\"b"] { stroke-width: 7px; }"#, 7.0),
+            ("a\\b", r#"[data-label='a\\b'] { stroke-width: 6px; }"#, 6.0),
+            ("x", r#"path[data-label='x'], g { stroke-width: 5px }"#, 5.0),
+            ("y", "/* c */ path:first-child { stroke-width: 3px; }", 3.0),
+        ] {
+            let untouched = stroke(label, rule);
+            let rewritten = stroke(label, &format!("{root_rule}{rule}"));
+            assert_eq!(
+                untouched == Some(px),
+                rewritten == Some(px),
+                "{rule}: {untouched:?} untouched, {rewritten:?} rewritten"
+            );
+        }
+        // usvg matches the first one, so the rewrite must too.
+        assert_eq!(
+            stroke(
+                "it's",
+                &format!(r#"{root_rule}[data-label="it's"] {{ stroke-width: 9px; }}"#)
+            ),
+            Some(9.0)
+        );
+    }
+
+    #[test]
+    fn bracketed_and_functional_selectors_keep_their_boundaries() {
+        let stroke = |svg_attrs: &[(&str, &str)], path_label: &str, embedded: &str| {
+            with_tree(
+                svg_attrs,
+                "",
+                embedded,
+                None,
+                &[("data-label", path_label)],
+                |tree| {
+                    tree.root().children().iter().find_map(|node| match node {
+                        usvg::Node::Path(p) => p.stroke().map(|s| s.width().get()),
+                        _ => None,
+                    })
+                },
+            )
+        };
+        let root = [("data-label", "it's")];
+        // An attribute selector right before the brace, with and without a
+        // space: the root's computed 40px applies once, so 0.1em is 4.
+        for embedded in [
+            r#"svg[data-label="it's"]{font-size:2em!important}"#,
+            r#"svg[data-label="it's"] {font-size:2em!important}"#,
+        ] {
+            assert_eq!(stroke(&root, "-", embedded), Some(4.0), "{embedded}");
+        }
+        // An attribute selector before a comma: the path rule survives
+        // whole, so its 9px stroke applies.
+        for embedded in [
+            r#"path[data-label="it's"], svg {font-size:2em!important;stroke-width:9px}"#,
+            r#"path[data-label="it's"],svg{font-size:2em!important;stroke-width:9px}"#,
+        ] {
+            assert_eq!(stroke(&[], "it's", embedded), Some(9.0), "{embedded}");
+        }
+        // A functional selector simplecss cannot parse, before a comma, is
+        // dropped as usvg drops it; the root selector after it still gets
+        // split, and nothing else matches the path.
+        let embedded = r#"path:nth-child(1), svg[data-label="it's"]{font-size:2em!important}"#;
+        assert_eq!(stroke(&root, "-", embedded), Some(4.0));
+    }
+
+    #[test]
+    fn split_lists_keep_the_selectors_simplecss_keeps_in_source_order() {
+        let stroke = |embedded: &str| {
+            with_tree(
+                &[("id", "r"), ("class", "c")],
+                "",
+                embedded,
+                None,
+                &[],
+                |tree| {
+                    tree.root().children().iter().find_map(|node| match node {
+                        usvg::Node::Path(p) => p.stroke().map(|s| s.width().get()),
+                        _ => None,
+                    })
+                },
+            )
+        };
+        // The same sheet in plain usvg, without Blitz: whether the path
+        // gets the rule's 9px stroke is the reference.
+        let plain = |embedded: &str| {
+            let source = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" id="r" class="c" viewBox="0 0 100 100" width="100" height="100"><style>{embedded}</style><path d="M0 50 L100 50" stroke="black" stroke-width="0.1em"/></svg>"#
+            );
+            let tree = usvg::Tree::from_str(&source, &usvg::Options::default()).unwrap();
+            tree.root().children().iter().find_map(|node| match node {
+                usvg::Node::Path(p) => p.stroke().map(|s| s.width().get()),
+                _ => None,
+            })
+        };
+        let body = "{font-size:40px!important;stroke-width:9px!important}";
+        for list in [
+            "#r,path",
+            "path,#r",
+            "#r, path, svg, .c",
+            ".c,svg,path,#r",
+            "path, path, #r",
+            "#r, #r, path",
+            // Selectors simplecss cannot parse, before and after others.
+            "path:nth-child(1), #r, path",
+            "#r, path:nth-child(1), path",
+            "#r, path:nth-child(1) g, path",
+            "#r, path > , path",
+            // Unicode spaces are not CSS whitespace: simplecss rejects a
+            // selector they end or start, and must see them where they are.
+            "#r, path\u{a0}",
+            "#r, path\u{2003}",
+            "#r,\u{a0}path",
+            "\u{2003}path, #r",
+            // CSS whitespace around selectors is fine. (Form feed is CSS
+            // whitespace too, but XML forbids it, so no SVG can hold it.)
+            "#r,\tpath\n",
+            "#r ,\t path ",
+            "\n#r,\r\npath",
+        ] {
+            let embedded = format!("{list} {body}");
+            let reference = plain(&embedded) == Some(9.0);
+            assert_eq!(stroke(&embedded) == Some(9.0), reference, "{list}");
+        }
+        // The orders and specificities from the report keep the path rule.
+        assert_eq!(stroke(&format!("#r,path {body}")), Some(9.0));
+        assert_eq!(stroke(&format!("path,#r {body}")), Some(9.0));
+        // A no-break space after `path` drops it, as in plain usvg: the
+        // path inherits the root's 40px, so 0.1em is 4. CSS whitespace does
+        // not.
+        assert_eq!(stroke(&format!("#r, path\u{a0} {body}")), Some(4.0));
+        assert_eq!(stroke(&format!("#r, path\u{2003} {body}")), Some(4.0));
+        assert_eq!(stroke(&format!("#r,\tpath\n {body}")), Some(9.0));
+    }
+
+    #[test]
+    fn root_font_rules_keep_every_property_but_the_size() {
+        // The root's text keeps the shorthand's style and weight; the size
+        // is the computed 40px.
+        let embedded = "svg { font: italic bold 2em serif; }";
+        assert_eq!(text_font(&[], embedded, None), (700, true, 40.0));
+        // A later longhand still wins over the shorthand, for the root and
+        // for a nested svg, whose size the rule still sets: 2em of 40px.
+        let embedded = "svg { font: italic bold 2em serif; font-weight: normal; }";
+        assert_eq!(text_font(&[], embedded, None), (400, true, 40.0));
+        assert_eq!(text_font(&[], embedded, Some(&[])), (400, true, 80.0));
+        // Important longhands keep their importance.
+        let embedded = "svg { font-weight: 300 !important; font: bold 2em serif; }";
+        assert_eq!(text_font(&[], embedded, None), (300, false, 40.0));
+    }
+
+    #[test]
+    fn em_lengths_resolve_against_the_computed_root_size_once() {
+        // Inherited 20px: 0.1em is 2.
+        assert_eq!(stroke_width(&[], ""), 2.0);
+        // The root's own relative size applies once: 2em of 20px is 40px.
+        assert_eq!(stroke_width(&[("style", "font-size: 2em")], ""), 4.0);
+        assert_eq!(stroke_width(&[("style", "font: 2em sans-serif")], ""), 4.0);
+        // A presentation attribute.
+        assert_eq!(stroke_width(&[("font-size", "40")], ""), 4.0);
+        // A stylesheet rule usvg cannot see still reaches it.
+        assert_eq!(stroke_width(&[], "svg { font-size: 30px; }"), 3.0);
+        // !important in a stylesheet beats the inline style.
+        assert_eq!(
+            stroke_width(
+                &[("style", "font-size: 2em")],
+                "svg { font-size: 30px !important; }"
+            ),
+            3.0
+        );
+        // The inline style beats a presentation attribute.
+        assert_eq!(
+            stroke_width(&[("font-size", "60"), ("style", "font-size: 30px")], ""),
+            3.0
+        );
+    }
+
+    #[test]
+    fn important_and_shorthand_inline_sizes_apply_once() {
+        // Computed 40px; usvg must not apply 2em again on top.
+        assert_eq!(
+            stroke_width(&[("style", "font-size: 2em !important")], ""),
+            4.0
+        );
+        assert_eq!(
+            stroke_width(
+                &[("style", "FONT : 2em/1 sans-serif ! IMPORTANT ; color: red")],
+                ""
+            ),
+            4.0
+        );
+        assert_eq!(stroke_width(&[("style", "font-size:200%")], ""), 4.0);
+    }
+
+    #[test]
+    fn embedded_rules_cannot_reapply_a_root_size() {
+        // An !important rule for the root inside the svg's own <style>
+        // must not apply 2em again on top of the computed size.
+        let embedded = "svg { font-size: 2em !important; }";
+        // Stylo applies the <style> to the root too (40px), as Chromium does.
+        assert_eq!(stroke_width_with(&[], "", embedded), 4.0);
+        assert_eq!(
+            stroke_width_with(&[("style", "font-size: 2em")], "", embedded),
+            4.0
+        );
+        assert_eq!(
+            stroke_width_with(
+                &[("style", "font: 2em sans-serif !important")],
+                "",
+                embedded
+            ),
+            4.0
+        );
+        // Embedded rules still style descendants: 0.3em of the root's 20px,
+        // and a path's own font size is its own.
+        assert_eq!(
+            stroke_width_with(&[], "", "path { stroke-width: 0.3em; }"),
+            6.0
+        );
+        assert_eq!(
+            stroke_width_with(&[], "", "path { font-size: 30px !important; }"),
+            3.0
+        );
+    }
+
+    #[test]
+    fn universal_important_rules_reach_descendants_not_the_computed_root() {
+        // A <style> inside the svg is a document style sheet, in Chromium
+        // and in Blitz, so `*` doubles every element from <html> down,
+        // beating the div's inline 20px: html 32, body 64, div 128, svg 256
+        // and path 512px, so 0.1em is 51.2. usvg must apply 2em once more
+        // only to the path, not to the root's computed 256px.
+        let embedded = "* { font-size: 2em !important; }";
+        assert_eq!(stroke_width_with(&[], "", embedded), 51.2);
+        // Root-only control: `svg` matches only the root here, the path
+        // inherits 40px.
+        assert_eq!(
+            stroke_width_with(&[], "", "svg { font-size: 2em !important; }"),
+            4.0
+        );
+        // A rule that does not match the root is left alone.
+        assert_eq!(stroke_width_with(&[], "", "path { font-size: 2em; }"), 4.0);
+    }
+
+    #[test]
+    fn nested_svgs_keep_their_own_cascade() {
+        // `svg` matches the root and the nested svg: root 40px, nested 2em
+        // of that = 80px, so 8.
+        let embedded = "svg { font-size: 2em !important; }";
+        assert_eq!(stroke_width_nested(&[], "", embedded, Some(&[])), 8.0);
+        // Without rules the nested svg inherits the root's computed size.
+        assert_eq!(
+            stroke_width_nested(&[("style", "font-size: 2em")], "", "", Some(&[])),
+            4.0
+        );
+        // An explicit size on the nested svg is its own.
+        assert_eq!(
+            stroke_width_nested(&[], "", "", Some(&[("style", "font-size: 30px")])),
+            3.0
+        );
+        // A relative one builds on the root's computed 40px.
+        assert_eq!(
+            stroke_width_nested(
+                &[("style", "font-size: 2em")],
+                "",
+                "",
+                Some(&[("font-size", "50%")])
+            ),
+            2.0
+        );
+    }
+
+    #[test]
+    fn font_size_attributes_use_the_css_grammar() {
+        // Keywords: `larger` is 1.2 times the parent in Stylo and Chromium.
+        assert!((stroke_width(&[("font-size", "larger")], "") - 2.4).abs() < 1e-4);
+        assert_eq!(stroke_width(&[("font-size", "calc(2 * 20px)")], ""), 4.0);
+        assert_eq!(stroke_width(&[("font-size", "2em")], ""), 4.0);
+        assert_eq!(stroke_width(&[("font-size", "150%")], ""), 3.0);
+        // Unitless numbers are SVG user units.
+        assert_eq!(stroke_width(&[("font-size", " 30 ")], ""), 3.0);
+        // Invalid values are ignored: the inherited 20px stays.
+        for bad in ["-10", "10px; color: red", "red", "", "10px 20px"] {
+            assert_eq!(stroke_width(&[("font-size", bad)], ""), 2.0, "{bad:?}");
+        }
+        // Presentation attributes sit above user-agent rules (the test
+        // sheet's origin) and below author CSS such as the inline style,
+        // which the inline cases above cover.
+        assert_eq!(
+            stroke_width(&[("font-size", "60")], "svg { font-size: 30px; }"),
+            6.0
+        );
     }
 }

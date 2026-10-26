@@ -612,20 +612,63 @@ impl ElementCx<'_, '_> {
             OutlineStyle::BorderStyle(style) => style,
         };
 
-        let path = match style {
-            BorderStyle::None | BorderStyle::Hidden => return,
-            BorderStyle::Solid => self.frame.outline(),
-
-            // TODO: Implement other border styles
-            BorderStyle::Inset
-            | BorderStyle::Groove
-            | BorderStyle::Outset
-            | BorderStyle::Ridge
-            | BorderStyle::Dotted
-            | BorderStyle::Dashed
-            | BorderStyle::Double => self.frame.outline(),
-        };
+        if matches!(style, BorderStyle::None | BorderStyle::Hidden) {
+            return;
+        }
+        // TODO: Paint the non-solid styles; they draw solid for now.
+        let path = self
+            .outline_frame(outline.outline_offset.to_f64_px())
+            .outline();
 
         scene.fill(Fill::NonZero, self.transform, color, None, &path);
+    }
+
+    /// The box around the outline ring, or `None` when the element draws no
+    /// outline. Effect layers grow to it so opacity and filters cover the
+    /// outline without clipping it.
+    pub(crate) fn outline_bounds(&self) -> Option<kurbo::Rect> {
+        let outline = self.style.get_outline();
+        let style = match outline.outline_style {
+            OutlineStyle::Auto => return None,
+            OutlineStyle::BorderStyle(style) => style,
+        };
+        if matches!(style, BorderStyle::None | BorderStyle::Hidden)
+            || self.frame.outline_width == 0.0
+        {
+            return None;
+        }
+        let frame = self.outline_frame(outline.outline_offset.to_f64_px());
+        Some(frame.outline_box.union(frame.border_box))
+    }
+
+    /// The box whose outline ring `CssBox::outline` draws: the border box
+    /// grown by `outline-offset`, in CSS pixels. As in Blink, rounded
+    /// corners grow by the offset and sharp corners stay sharp.
+    fn outline_frame(&self, offset: f64) -> crate::kurbo_css::CssBox {
+        let frame = &self.frame;
+        if offset == 0.0 {
+            return frame.clone();
+        }
+        let offset = offset * self.scale;
+        let grow = |r: Vec2| {
+            if r.x == 0.0 || r.y == 0.0 {
+                Vec2::ZERO
+            } else {
+                Vec2::new((r.x + offset).max(0.0), (r.y + offset).max(0.0))
+            }
+        };
+        let radii = &frame.border_radii;
+        crate::kurbo_css::CssBox::new(
+            frame.border_box.inflate(offset, offset),
+            Insets::ZERO,
+            Insets::ZERO,
+            frame.outline_width,
+            crate::kurbo_css::NonUniformRoundedRectRadii {
+                top_left: grow(radii.top_left),
+                top_right: grow(radii.top_right),
+                bottom_right: grow(radii.bottom_right),
+                bottom_left: grow(radii.bottom_left),
+            },
+        )
     }
 }

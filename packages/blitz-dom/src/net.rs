@@ -590,8 +590,8 @@ impl ImageHandler {
 
         #[cfg(feature = "svg")]
         let svg_err = {
-            use crate::util::parse_svg_image;
-            match parse_svg_image(&bytes) {
+            use crate::util::{SVG_IMAGE_FONT_SIZE, parse_svg_image};
+            match parse_svg_image(&bytes, SVG_IMAGE_FONT_SIZE, None) {
                 Ok(svg) => return Ok(Resource::Svg(self.kind, svg)),
                 Err(e) => e.to_string(),
             }
