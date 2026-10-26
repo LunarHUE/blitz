@@ -125,7 +125,7 @@ impl BaseDocument {
 
         match event {
             GeneratedTextInputEvent::Input => {
-                let value = input_data.editor.raw_text().to_string();
+                let value = input_data.value();
                 dispatch_event(DomEvent::new(
                     node_id,
                     DomEventData::Input(BlitzInputEvent { value }),
@@ -543,5 +543,385 @@ mod read_only_tests {
             .set_attribute(input, qual_name!("readonly"), "");
         d.ime(BlitzImeEvent::Disabled);
         assert_eq!(d.text(input), "fixed");
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use std::sync::{Arc, Mutex};
+
+    use blitz_traits::events::{BlitzImeEvent, DomEventData, KeyState};
+    use blitz_traits::shell::{ClipboardError, ColorScheme, ShellProvider, Viewport};
+    use keyboard_types::{Code, Location};
+
+    use super::*;
+    use crate::events::ime::handle_ime_event;
+    use crate::{Attribute, DocumentConfig, qual_name};
+
+    const MASK: char = '\u{2022}';
+
+    #[derive(Default)]
+    struct Clipboard(Mutex<String>);
+
+    impl ShellProvider for Clipboard {
+        fn get_clipboard_text(&self) -> Result<String, ClipboardError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        fn set_clipboard_text(&self, text: String) -> Result<(), ClipboardError> {
+            *self.0.lock().unwrap() = text;
+            Ok(())
+        }
+    }
+
+    struct Doc {
+        doc: BaseDocument,
+        clip: Arc<Clipboard>,
+        /// `<input type="password" value="old">`
+        input: NodeId,
+        /// The `value` of the last input event.
+        sent: Vec<String>,
+    }
+
+    fn make() -> Doc {
+        let clip = Arc::new(Clipboard::default());
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            shell_provider: Some(clip.clone()),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![]);
+        let input = m.create_element(
+            qual_name!("input"),
+            vec![
+                Attribute {
+                    name: qual_name!("type"),
+                    value: "password".into(),
+                },
+                Attribute {
+                    name: qual_name!("value"),
+                    value: "old".into(),
+                },
+            ],
+        );
+        m.append_children(body, &[input]);
+        m.append_children(html, &[body]);
+        m.append_children(root, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        assert!(doc.set_focus_to(input));
+        Doc {
+            doc,
+            clip,
+            input,
+            sent: Vec::new(),
+        }
+    }
+
+    impl Doc {
+        fn data(&self) -> &crate::node::TextInputData {
+            self.doc.nodes[self.input]
+                .element_data()
+                .unwrap()
+                .text_input_data()
+                .unwrap()
+        }
+
+        /// What the editor holds, and so what is painted and selected.
+        fn shown(&self) -> String {
+            self.data().editor.raw_text().to_string()
+        }
+
+        fn value(&self) -> String {
+            self.data().value()
+        }
+
+        fn send(&mut self, event: KeyboardOrTextInputEvent) -> usize {
+            let mut sent = Vec::new();
+            handle_key_or_input_event(&mut self.doc, self.input, event, |e| {
+                if let DomEventData::Input(i) = e.data {
+                    sent.push(i.value);
+                }
+            });
+            let n = sent.len();
+            self.sent.extend(sent);
+            n
+        }
+
+        fn key(&mut self, key: Key, mods: Modifiers) -> usize {
+            self.send(KeyboardOrTextInputEvent::KeyPress(BlitzKeyEvent {
+                key,
+                code: Code::Unidentified,
+                modifiers: mods,
+                location: Location::Standard,
+                is_auto_repeating: false,
+                is_composing: false,
+                state: KeyState::Pressed,
+                text: None,
+            }))
+        }
+
+        fn type_text(&mut self, s: &str) {
+            use unicode_segmentation::UnicodeSegmentation as _;
+            for g in s.graphemes(true) {
+                self.key(Key::Character(g.into()), Modifiers::empty());
+            }
+        }
+
+        fn named(&mut self, k: NamedKey) -> usize {
+            self.key(Key::Named(k), Modifiers::empty())
+        }
+
+        fn action(&mut self, c: &str) -> usize {
+            self.key(Key::Character(c.into()), ACTION_MOD)
+        }
+
+        fn ime(&mut self, event: BlitzImeEvent) {
+            let mut sent = Vec::new();
+            handle_ime_event(&mut self.doc, event, |e| {
+                if let DomEventData::Input(i) = e.data {
+                    sent.push(i.value);
+                }
+            });
+            self.sent.extend(sent);
+        }
+
+        fn masked(&self, n: usize) -> bool {
+            let shown = self.shown();
+            shown.chars().all(|c| c == MASK) && shown.chars().count() == n
+        }
+    }
+
+    #[test]
+    fn a_password_shows_one_mask_per_grapheme_and_sends_the_real_value() {
+        let mut d = make();
+        assert!(d.masked(3), "initial value is masked: {:?}", d.shown());
+        assert_eq!(d.value(), "old");
+        d.named(NamedKey::End);
+        // A combining accent and an emoji with a skin tone are one each.
+        d.type_text("e\u{301}👍🏽!");
+        assert!(d.masked(6), "{:?}", d.shown());
+        assert_eq!(d.value(), "olde\u{301}👍🏽!");
+        assert_eq!(d.sent.last().unwrap(), "olde\u{301}👍🏽!");
+        assert!(!d.sent.iter().any(|v| v.contains(MASK)));
+    }
+
+    #[test]
+    fn editing_in_the_middle_keeps_the_real_text_in_step() {
+        let mut d = make();
+        d.named(NamedKey::End);
+        d.type_text("👍🏽x");
+        d.named(NamedKey::Backspace);
+        assert_eq!(d.value(), "old👍🏽");
+        d.named(NamedKey::Backspace);
+        assert_eq!(d.value(), "old", "the emoji goes in one step");
+        d.named(NamedKey::Home);
+        d.named(NamedKey::ArrowRight);
+        d.type_text("Z");
+        assert_eq!(d.value(), "oZld");
+        d.named(NamedKey::Delete);
+        assert_eq!(d.value(), "oZd");
+        d.key(Key::Named(NamedKey::ArrowRight), Modifiers::SHIFT);
+        d.type_text("Q");
+        assert_eq!(d.value(), "oZQ");
+        assert!(d.masked(3));
+        d.action("a");
+        d.type_text("new");
+        assert_eq!(d.value(), "new");
+        assert!(d.masked(3));
+    }
+
+    #[test]
+    fn copy_and_cut_leave_the_clipboard_alone_and_paste_is_masked() {
+        let mut d = make();
+        *d.clip.0.lock().unwrap() = "p@ss".into();
+        d.action("a");
+        assert_eq!(d.action("c"), 0);
+        assert_eq!(d.action("x"), 0);
+        assert_eq!(*d.clip.0.lock().unwrap(), "p@ss");
+        assert_eq!(d.value(), "old");
+        assert_eq!(d.action("v"), 1);
+        assert_eq!(d.value(), "p@ss");
+        assert!(d.masked(4));
+    }
+
+    #[test]
+    fn ime_composes_nothing_visible_and_commits_masked() {
+        let mut d = make();
+        d.named(NamedKey::End);
+        d.ime(BlitzImeEvent::Preedit("か".into(), None));
+        assert!(d.masked(3), "no composition on screen: {:?}", d.shown());
+        d.ime(BlitzImeEvent::Preedit(String::new(), None));
+        d.ime(BlitzImeEvent::Commit("漢".into()));
+        assert_eq!(d.value(), "old漢");
+        assert!(d.masked(4));
+    }
+
+    #[test]
+    fn apple_bindings_delete_but_never_rearrange() {
+        let mut d = make();
+        d.named(NamedKey::End);
+        assert_eq!(
+            d.send(KeyboardOrTextInputEvent::AppleStandardKeyBinding(
+                "deleteBackward:".into()
+            )),
+            1
+        );
+        assert_eq!(d.value(), "ol");
+        for command in ["transpose:", "uppercaseWord:", "yank:", "insertText:"] {
+            assert_eq!(
+                d.send(KeyboardOrTextInputEvent::AppleStandardKeyBinding(
+                    command.into()
+                )),
+                0,
+                "{command}"
+            );
+        }
+        assert_eq!(d.value(), "ol");
+    }
+
+    #[test]
+    fn changing_type_reveals_and_masks_again_keeping_the_value() {
+        let mut d = make();
+        let input = d.input;
+        d.doc
+            .mutate()
+            .set_attribute(input, qual_name!("type"), "text");
+        assert_eq!(d.shown(), "old");
+        assert!(!d.data().is_secret());
+        d.named(NamedKey::End);
+        d.type_text("er");
+        d.doc
+            .mutate()
+            .set_attribute(input, qual_name!("type"), "password");
+        assert!(d.masked(5));
+        assert_eq!(d.value(), "older");
+        d.type_text("!");
+        assert_eq!(d.value(), "older!", "the caret is at the end");
+        d.doc.mutate().clear_attribute(input, qual_name!("type"));
+        assert_eq!(d.shown(), "older!");
+    }
+
+    #[test]
+    fn a_controlled_value_is_masked_too() {
+        let mut d = make();
+        let input = d.input;
+        d.doc
+            .mutate()
+            .set_attribute(input, qual_name!("value"), "s3cr3t");
+        assert_eq!(d.value(), "s3cr3t");
+        assert!(d.masked(6));
+    }
+
+    /// Types `s` one `char` at a time, so marks and joiners arrive alone.
+    fn type_chars(d: &mut Doc, s: &str) {
+        for c in s.chars() {
+            d.key(
+                Key::Character(c.to_string().as_str().into()),
+                Modifiers::empty(),
+            );
+        }
+    }
+
+    #[test]
+    fn marks_and_joiners_typed_alone_join_the_cluster_before_them() {
+        let mut d = make();
+        d.action("a");
+        // e, then a combining acute: one cluster.
+        type_chars(&mut d, "e\u{301}");
+        assert!(d.masked(1), "{:?}", d.shown());
+        // A thumbs-up, then a skin tone: one cluster.
+        type_chars(&mut d, "👍🏽");
+        assert!(d.masked(2), "{:?}", d.shown());
+        // Man, zero-width joiner, woman, joiner, girl: one family.
+        type_chars(&mut d, "👨\u{200D}👩\u{200D}👧");
+        assert!(d.masked(3), "{:?}", d.shown());
+        // Two regional indicators: one flag.
+        type_chars(&mut d, "🇳🇿");
+        assert!(d.masked(4), "{:?}", d.shown());
+        let want = "e\u{301}👍🏽👨\u{200D}👩\u{200D}👧🇳🇿";
+        assert_eq!(d.value(), want);
+        assert_eq!(
+            d.sent.last().unwrap(),
+            want,
+            "each event carries the real value"
+        );
+        // The caret follows the joined clusters: the next key lands last.
+        type_chars(&mut d, "!");
+        assert_eq!(d.value(), format!("{want}!"));
+        assert!(d.masked(5));
+    }
+
+    #[test]
+    fn a_mark_typed_in_the_middle_joins_and_the_caret_stays_after_it() {
+        let mut d = make();
+        d.action("a");
+        type_chars(&mut d, "ab");
+        d.named(NamedKey::Home);
+        d.named(NamedKey::ArrowRight);
+        type_chars(&mut d, "\u{301}");
+        assert_eq!(d.value(), "a\u{301}b");
+        assert!(d.masked(2));
+        type_chars(&mut d, "x");
+        assert_eq!(
+            d.value(),
+            "a\u{301}xb",
+            "the caret sat after the joined cluster"
+        );
+        // Backspace takes the whole x, then the whole accented a.
+        d.named(NamedKey::Backspace);
+        d.named(NamedKey::Backspace);
+        assert_eq!(d.value(), "b");
+        assert!(d.masked(1));
+    }
+
+    #[test]
+    fn replacing_a_selection_and_deleting_between_flags() {
+        let mut d = make();
+        d.action("a");
+        type_chars(&mut d, "🇳🇿🇦🇺🇬🇧");
+        assert!(d.masked(3));
+        // Select the middle flag and replace it.
+        d.named(NamedKey::Home);
+        d.named(NamedKey::ArrowRight);
+        d.key(Key::Named(NamedKey::ArrowRight), Modifiers::SHIFT);
+        type_chars(&mut d, "x");
+        assert_eq!(d.value(), "🇳🇿x🇬🇧");
+        assert!(d.masked(3));
+        // Deleting the x leaves the two flags apart, still two clusters.
+        d.named(NamedKey::Backspace);
+        assert_eq!(d.value(), "🇳🇿🇬🇧");
+        assert!(d.masked(2));
+    }
+
+    #[test]
+    fn a_value_set_while_focused_and_a_cancelled_composition() {
+        let mut d = make();
+        let input = d.input;
+        d.named(NamedKey::End);
+        d.doc
+            .mutate()
+            .set_attribute(input, qual_name!("value"), "e\u{301}e");
+        assert_eq!(d.value(), "e\u{301}e");
+        assert!(d.masked(2));
+        d.named(NamedKey::End);
+        type_chars(&mut d, "!");
+        assert_eq!(d.value(), "e\u{301}e!");
+        // A composition shows nothing and, cancelled, changes nothing.
+        let sent = d.sent.len();
+        d.ime(BlitzImeEvent::Preedit("か".into(), None));
+        d.ime(BlitzImeEvent::Preedit(String::new(), None));
+        assert_eq!(d.value(), "e\u{301}e!");
+        assert!(d.masked(3));
+        assert_eq!(
+            d.sent.len(),
+            sent,
+            "no input event for a cancelled composition"
+        );
+        d.ime(BlitzImeEvent::Commit("\u{301}".into()));
+        assert_eq!(d.value(), "e\u{301}e!\u{301}");
+        assert!(d.masked(3), "a committed mark joins too");
     }
 }

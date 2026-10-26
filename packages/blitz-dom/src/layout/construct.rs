@@ -908,6 +908,9 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         let mut text_input_data = TextInputData::new(is_multiline);
         let editor = &mut text_input_data.editor;
         editor.set_text(&initial_text);
+        if !is_multiline && element.attr(local_name!("type")) == Some("password") {
+            text_input_data.mask_new();
+        }
         element.special_data = SpecialElementData::TextInput(text_input_data);
     }
 

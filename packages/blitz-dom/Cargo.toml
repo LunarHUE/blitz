@@ -70,6 +70,7 @@ anyrender = { workspace = true, optional = true }
 # Linebender/Fontations dependencies
 accesskit = { workspace = true, optional = true }
 parley = { workspace = true }
+unicode-segmentation = "1.13"
 skrifa = { workspace = true }
 linebender_resource_handle = { workspace = true }
 color = { workspace = true }

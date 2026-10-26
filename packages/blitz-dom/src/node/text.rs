@@ -79,6 +79,80 @@ pub struct TextInputData {
     /// vertical offset. It is kept up to date so that the caret remains visible within the
     /// input's content box.
     pub scroll_offset: f32,
+    /// A password input's real text. The editor holds one mask character
+    /// per grapheme cluster of it, so painting, selection and the caret
+    /// never see the text itself.
+    pub(crate) secret: Option<String>,
+}
+
+/// The character a password input shows for each grapheme of its text.
+const MASK: &str = "\u{2022}";
+
+/// The byte offset where each grapheme cluster of `s` starts, then `s.len()`.
+fn cluster_starts(s: &str) -> Vec<usize> {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    let mut starts: Vec<usize> = s.grapheme_indices(true).map(|(i, _)| i).collect();
+    starts.push(s.len());
+    starts
+}
+
+/// Replaces clusters `first..last` of a password's real text with `s`,
+/// then masks the result afresh. Segmenting the whole text again, rather
+/// than the inserted piece alone, lets a combining mark or a joiner typed
+/// on its own join the cluster before it. The caret goes after whatever
+/// cluster the inserted text ended in.
+fn replace_secret<T: parley::Brush>(
+    driver: &mut parley::PlainEditorDriver<'_, T>,
+    real: &mut String,
+    first: usize,
+    last: usize,
+    s: &str,
+) {
+    let starts = cluster_starts(real);
+    let count = starts.len() - 1;
+    let (from, to) = (starts[first.min(count)], starts[last.min(count)]);
+    real.replace_range(from..to, s);
+    let caret_byte = from + s.len();
+    let starts = cluster_starts(real);
+    let count = starts.len() - 1;
+    // Clusters that start before the caret's byte: the caret follows them.
+    let caret = starts[..count].iter().filter(|&&b| b < caret_byte).count();
+    driver.editor.set_text(&MASK.repeat(count));
+    driver.refresh_layout();
+    driver.move_to_byte(caret * MASK.len());
+}
+
+/// Replaces the selection with `s`, masked if the input is a password.
+fn insert<T: parley::Brush>(
+    driver: &mut parley::PlainEditorDriver<'_, T>,
+    secret: &mut Option<String>,
+    s: &str,
+) {
+    match secret {
+        Some(real) => {
+            let range = driver.editor.raw_selection().text_range();
+            let (first, last) = (range.start / MASK.len(), range.end / MASK.len());
+            replace_secret(driver, real, first, last, s);
+        }
+        None => driver.insert_or_replace_selection(s),
+    }
+}
+
+/// Runs a deleting edit. On a password it runs on the mask to learn which
+/// clusters go, and the same clusters leave the real text. Every deletion
+/// leaves the caret where the removed run began.
+fn delete<'a, T: parley::Brush>(
+    driver: &mut parley::PlainEditorDriver<'a, T>,
+    secret: &mut Option<String>,
+    edit: impl FnOnce(&mut parley::PlainEditorDriver<'a, T>),
+) {
+    let before = driver.editor.raw_text().len();
+    edit(driver);
+    if let Some(real) = secret {
+        let removed = (before - driver.editor.raw_text().len()) / MASK.len();
+        let at = driver.editor.raw_selection().focus().index() / MASK.len();
+        replace_secret(driver, real, at, at + removed, "");
+    }
 }
 
 // FIXME: Implement Clone for PlainEditor
@@ -95,7 +169,58 @@ impl TextInputData {
             editor,
             is_multiline,
             scroll_offset: 0.0,
+            secret: None,
         }
+    }
+
+    /// The input's value: its text, or a password's real text rather than
+    /// the mask the editor holds.
+    pub fn value(&self) -> String {
+        match &self.secret {
+            Some(real) => real.clone(),
+            None => self.editor.raw_text().to_string(),
+        }
+    }
+
+    /// Masks a new password input's text, before its first layout.
+    pub(crate) fn mask_new(&mut self) {
+        let real = self.editor.raw_text().to_string();
+        self.editor
+            .set_text(&MASK.repeat(cluster_starts(&real).len() - 1));
+        self.secret = Some(real);
+    }
+
+    /// Whether this is a password input, which masks its text.
+    pub fn is_secret(&self) -> bool {
+        self.secret.is_some()
+    }
+
+    /// Turns masking on or off, keeping the value, as when an input's
+    /// `type` changes between `password` and something else.
+    pub(crate) fn set_secret(
+        &mut self,
+        font_ctx: &mut FontContext,
+        layout_ctx: &mut LayoutContext<TextBrush>,
+        on: bool,
+    ) {
+        if on == self.secret.is_some() {
+            return;
+        }
+        let value = self.value();
+        let shown = if on {
+            let shown = MASK.repeat(cluster_starts(&value).len() - 1);
+            self.secret = Some(value);
+            shown
+        } else {
+            self.secret = None;
+            value
+        };
+        self.editor.set_text(&shown);
+        // Byte offsets mean different things in the two texts, so the caret
+        // goes to the end, as a browser leaves it after a type change.
+        let mut driver = self.editor.driver(font_ctx, layout_ctx);
+        driver.refresh_layout();
+        driver.move_to_text_end();
     }
 
     pub fn set_text(
@@ -104,6 +229,15 @@ impl TextInputData {
         layout_ctx: &mut LayoutContext<TextBrush>,
         text: &str,
     ) {
+        if let Some(real) = &mut self.secret {
+            if real != text {
+                *real = text.to_string();
+                let shown = MASK.repeat(cluster_starts(text).len() - 1);
+                self.editor.set_text(&shown);
+                self.editor.driver(font_ctx, layout_ctx).refresh_layout();
+            }
+            return;
+        }
         if self.editor.text() != text {
             self.editor.set_text(text);
             self.editor.driver(font_ctx, layout_ctx).refresh_layout();
@@ -226,9 +360,18 @@ impl TextInputData {
         let action_mod = mods.contains(ACTION_MOD);
 
         let is_multiline = self.is_multiline;
+        let secret = &mut self.secret;
         let editor = &mut self.editor;
         let mut driver = editor.driver(font_ctx, layout_ctx);
         match event.key {
+            // A password's text never leaves it: Copy and Cut do nothing.
+            Key::Character(c)
+                if action_mod
+                    && secret.is_some()
+                    && matches!(c.to_lowercase().as_str(), "c" | "x") =>
+            {
+                return None;
+            }
             Key::Character(c) if action_mod && matches!(c.as_str(), "c" | "x" | "v") => {
                 match c.to_lowercase().as_str() {
                     // Copy changes nothing, so it reports no input.
@@ -248,12 +391,12 @@ impl TextInputData {
                         if read_only {
                             return None;
                         }
-                        driver.delete_selection()
+                        delete(&mut driver, secret, |d| d.delete_selection())
                     }
                     "v" if read_only => return None,
                     "v" => {
                         let text = shell_provider.get_clipboard_text().unwrap_or_default();
-                        driver.insert_or_replace_selection(&text)
+                        insert(&mut driver, secret, &text)
                     }
                     _ => unreachable!(),
                 }
@@ -343,9 +486,9 @@ impl TextInputData {
             Key::Named(NamedKey::Delete) if read_only => {}
             Key::Named(NamedKey::Delete) => {
                 if action_mod {
-                    driver.delete_word()
+                    delete(&mut driver, secret, |d| d.delete_word())
                 } else {
-                    driver.delete()
+                    delete(&mut driver, secret, |d| d.delete())
                 }
                 return Some(GeneratedTextInputEvent::Input);
             }
@@ -356,9 +499,9 @@ impl TextInputData {
             #[cfg(not(target_os = "macos"))]
             Key::Named(NamedKey::Backspace) => {
                 if action_mod {
-                    driver.backdelete_word()
+                    delete(&mut driver, secret, |d| d.backdelete_word())
                 } else {
-                    driver.backdelete()
+                    delete(&mut driver, secret, |d| d.backdelete())
                 }
                 return Some(GeneratedTextInputEvent::Input);
             }
@@ -387,7 +530,7 @@ impl TextInputData {
             Key::Character(s)
                 if !mods.contains(Modifiers::CONTROL) && !mods.contains(Modifiers::META) =>
             {
-                driver.insert_or_replace_selection(&s);
+                insert(&mut driver, secret, &s);
                 return Some(GeneratedTextInputEvent::Input);
             }
             _ => {}
@@ -406,6 +549,20 @@ impl TextInputData {
     ) -> Option<GeneratedTextInputEvent> {
         if read_only && !keeps_text(command, self.is_multiline) {
             return None;
+        }
+        if self.secret.is_some() && !keeps_text(command, self.is_multiline) {
+            let secret = &mut self.secret;
+            let mut driver = self.editor.driver(font_ctx, layout_ctx);
+            match command {
+                "deleteBackward:" => delete(&mut driver, secret, |d| d.backdelete()),
+                "deleteForward:" => delete(&mut driver, secret, |d| d.delete()),
+                "deleteWordBackward:" => delete(&mut driver, secret, |d| d.backdelete_word()),
+                "deleteWordForward:" => delete(&mut driver, secret, |d| d.delete_word()),
+                // Anything else would edit text the mask hides, such as a
+                // transpose, or reveal it, such as a case change.
+                _ => return None,
+            }
+            return Some(GeneratedTextInputEvent::Input);
         }
         let editor = &mut self.editor;
         let mut driver = editor.driver(font_ctx, layout_ctx);
@@ -797,10 +954,14 @@ impl TextInputData {
         layout_ctx: &mut LayoutContext<TextBrush>,
         event: BlitzImeEvent,
     ) -> Option<GeneratedTextInputEvent> {
+        let secret = &mut self.secret;
         let editor = &mut self.editor;
         let mut driver = editor.driver(font_ctx, layout_ctx);
 
         match event {
+            // A composition would draw its text in the clear, so a password
+            // shows none; the committed text is masked like typing.
+            BlitzImeEvent::Preedit(text, _) if secret.is_some() && !text.is_empty() => None,
             BlitzImeEvent::Enabled => {
                 // Do nothing
                 None
@@ -810,7 +971,7 @@ impl TextInputData {
                 Some(GeneratedTextInputEvent::PreEditChange)
             }
             BlitzImeEvent::Commit(text) => {
-                driver.insert_or_replace_selection(&text);
+                insert(&mut driver, secret, &text);
                 Some(GeneratedTextInputEvent::Input)
             }
             BlitzImeEvent::Preedit(text, cursor) => {

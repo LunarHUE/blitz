@@ -340,6 +340,21 @@ impl DocumentMutator<'_> {
             element.flush_link_state();
         }
 
+        // A text input's type moving to or from `password` masks or
+        // unmasks its text, keeping the value.
+        if name.local == local_name!("type") {
+            let password = value == "password";
+            if let Some(input_data) = element.text_input_data_mut() {
+                if !input_data.is_multiline {
+                    input_data.set_secret(
+                        &mut self.doc.font_ctx.lock().unwrap(),
+                        &mut self.doc.layout_ctx,
+                        password,
+                    );
+                }
+            }
+        }
+
         let tag = &element.name.local;
         let attr = &name.local;
 
@@ -463,6 +478,17 @@ impl DocumentMutator<'_> {
 
         if name.local == local_name!("href") {
             element.flush_link_state();
+        }
+
+        // Dropping a password input's type makes it a plain text input.
+        if name.local == local_name!("type") {
+            if let Some(input_data) = element.text_input_data_mut() {
+                input_data.set_secret(
+                    &mut self.doc.font_ctx.lock().unwrap(),
+                    &mut self.doc.layout_ctx,
+                    false,
+                );
+            }
         }
 
         // Update text input value
