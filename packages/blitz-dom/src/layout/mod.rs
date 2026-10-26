@@ -327,7 +327,11 @@ impl LayoutPassState<'_> {
                 }
 
                 if *element_data.name.local == *"input" {
-                    match element_data.attr(local_name!("type")) {
+                    // `type` values are ASCII case-insensitive.
+                    let input_type = element_data
+                        .attr(local_name!("type"))
+                        .map(str::to_ascii_lowercase);
+                    match input_type.as_deref() {
                         // if the input type is hidden, hide it
                         Some("hidden") => {
                             return taffy::LayoutOutput::HIDDEN;

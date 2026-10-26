@@ -405,8 +405,13 @@ fn role_from_element_data(element_data: &ElementData) -> Option<Role> {
         "iframe" => Some(Role::Iframe),
 
         "input" => {
-            let ty = element_data.attr(local_name!("type")).unwrap_or("text");
-            match ty {
+            // `type` values are ASCII case-insensitive; a `PASSWORD` field
+            // is still announced as a password field.
+            let ty = element_data
+                .attr(local_name!("type"))
+                .unwrap_or("text")
+                .to_ascii_lowercase();
+            match ty.as_str() {
                 "button" | "submit" | "reset" => Some(Role::Button),
                 "checkbox" => Some(Role::CheckBox),
                 "color" => Some(Role::ColorWell),

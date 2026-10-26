@@ -454,10 +454,13 @@ fn collect_layout_children_with_wrap(
         // Handle text inputs
         let tag_name = el.name.local.as_ref();
         if matches!(tag_name, "input" | "textarea") {
-            let type_attr: Option<&str> = doc.nodes[container_node_id]
+            // `type` values are ASCII case-insensitive.
+            let type_attr: Option<String> = doc.nodes[container_node_id]
                 .data
                 .downcast_element()
-                .and_then(|el| el.attr(local_name!("type")));
+                .and_then(|el| el.attr(local_name!("type")))
+                .map(str::to_ascii_lowercase);
+            let type_attr = type_attr.as_deref();
             if tag_name == "textarea" {
                 create_text_editor(doc, container_node_id, true);
                 return;
@@ -908,7 +911,11 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         let mut text_input_data = TextInputData::new(is_multiline);
         let editor = &mut text_input_data.editor;
         editor.set_text(&initial_text);
-        if !is_multiline && element.attr(local_name!("type")) == Some("password") {
+        if !is_multiline
+            && element
+                .attr(local_name!("type"))
+                .is_some_and(|t| t.eq_ignore_ascii_case("password"))
+        {
             text_input_data.mask_new();
         }
         element.special_data = SpecialElementData::TextInput(text_input_data);

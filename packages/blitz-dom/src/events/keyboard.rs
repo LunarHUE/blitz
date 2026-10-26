@@ -156,7 +156,7 @@ fn implicit_form_submission(doc: &BaseDocument, text_target: NodeId) {
         .filter(|element_data| {
             element_data.attr(local_name!("type")).is_some_and(|t| {
                 matches!(
-                    t,
+                    t.to_ascii_lowercase().as_str(),
                     "text"
                         | "search"
                         | "email"
@@ -1000,5 +1000,69 @@ mod secret_tests {
         assert_eq!(d.value(), "old", "the composition is not part of the value");
         assert!(d.masked(3), "{:?}", d.shown());
         assert!(!d.shown().contains('か'));
+    }
+
+    #[test]
+    fn the_password_type_is_case_insensitive() {
+        let mut d = make();
+        let input = d.input;
+        for t in ["PASSWORD", "Password"] {
+            d.doc
+                .mutate()
+                .set_attribute(input, qual_name!("type"), "text");
+            assert_eq!(d.shown(), "old");
+            d.doc.mutate().set_attribute(input, qual_name!("type"), t);
+            d.doc.resolve(0.0);
+            assert!(d.masked(3), "{t}: {:?}", d.shown());
+            assert_eq!(d.value(), "old");
+            // The leak the review found: Copy after a case-only change.
+            *d.clip.0.lock().unwrap() = "sentinel".into();
+            assert!(d.doc.set_focus_to(input) || d.doc.focus_node_id == Some(input));
+            d.action("a");
+            assert_eq!(d.action("c"), 0);
+            assert_eq!(d.action("x"), 0);
+            assert_eq!(*d.clip.0.lock().unwrap(), "sentinel", "{t}");
+        }
+    }
+
+    #[test]
+    fn an_upper_case_password_type_is_built_as_a_masked_text_input() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![]);
+        let input = m.create_element(
+            qual_name!("input"),
+            vec![
+                Attribute {
+                    name: qual_name!("type"),
+                    value: "PASSWORD".into(),
+                },
+                Attribute {
+                    name: qual_name!("value"),
+                    value: "hunter2".into(),
+                },
+            ],
+        );
+        m.append_children(body, &[input]);
+        m.append_children(html, &[body]);
+        m.append_children(root, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        let data = doc.nodes[input]
+            .element_data()
+            .unwrap()
+            .text_input_data()
+            .expect("an upper-case type still makes a text input");
+        assert_eq!(data.value(), "hunter2");
+        assert_eq!(data.editor.raw_text(), "\u{2022}".repeat(7));
+        assert!(
+            doc.nodes[input].final_layout().size.height > 0.0,
+            "it is laid out"
+        );
     }
 }

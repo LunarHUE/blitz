@@ -343,7 +343,8 @@ impl DocumentMutator<'_> {
         // A text input's type moving to or from `password` masks or
         // unmasks its text, keeping the value.
         if name.local == local_name!("type") {
-            let password = value == "password";
+            // `type` values are ASCII case-insensitive.
+            let password = value.eq_ignore_ascii_case("password");
             if let Some(input_data) = element.text_input_data_mut() {
                 if !input_data.is_multiline {
                     input_data.set_secret(
