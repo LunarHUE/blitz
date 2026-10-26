@@ -811,9 +811,33 @@ pub(crate) fn handle_click(
         false
     };
 
-    // If nothing is matched then clear focus
+    // Otherwise focus moves to the nearest focusable ancestor, as in a
+    // browser, including one taken out of the tab order with tabindex="-1";
+    // with none, focus clears.
     if !matched {
-        generate_focus_events(doc, &mut |doc| doc.clear_focus(), dispatch_event);
+        let mut focus_target = None;
+        let mut maybe_node_id = Some(target);
+        while let Some(node_id) = maybe_node_id {
+            let node = &doc.nodes[node_id];
+            if let Some(el) = node.element_data() {
+                let disabled = el.attr(local_name!("disabled")).is_some();
+                if !disabled && (el.is_focussable || el.attr(local_name!("tabindex")).is_some()) {
+                    focus_target = Some(node_id);
+                    break;
+                }
+            }
+            maybe_node_id = node.parent;
+        }
+        match focus_target {
+            Some(node_id) => generate_focus_events(
+                doc,
+                &mut |doc| {
+                    doc.set_focus_to(node_id);
+                },
+                dispatch_event,
+            ),
+            None => generate_focus_events(doc, &mut |doc| doc.clear_focus(), dispatch_event),
+        }
     }
 
     // Dispatch double-click event if this is the second click in quick succession
@@ -845,5 +869,105 @@ pub(crate) fn handle_wheel<F: FnMut(DomEvent)>(
     );
     if has_changed {
         doc.shell_provider.request_redraw();
+    }
+}
+
+#[cfg(test)]
+mod click_focus_tests {
+    use super::*;
+    use crate::{Attribute, DocumentConfig, qual_name};
+    use blitz_traits::events::{BlitzPointerId, MouseEventButtons, PointerCoords, PointerDetails};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+    use keyboard_types::Modifiers;
+
+    fn attr(name: markup5ever::QualName, value: &str) -> Attribute {
+        Attribute {
+            name,
+            value: value.into(),
+        }
+    }
+
+    struct Ids {
+        panel: NodeId,
+        control: NodeId,
+        text: NodeId,
+        outside: NodeId,
+    }
+
+    /// `<div tabindex=-1 (panel)><div tabindex=0 (control)>x</div><p>text</p></div>`
+    /// next to a plain `<p>` outside the panel.
+    fn make_doc() -> (BaseDocument, Ids) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![]);
+        let panel = m.create_element(qual_name!("div"), vec![attr(qual_name!("tabindex"), "-1")]);
+        let control = m.create_element(qual_name!("div"), vec![attr(qual_name!("tabindex"), "0")]);
+        let text = m.create_element(qual_name!("p"), vec![]);
+        let outside = m.create_element(qual_name!("p"), vec![]);
+        m.append_children(panel, &[control, text]);
+        m.append_children(body, &[panel, outside]);
+        m.append_children(html, &[body]);
+        m.append_children(root_id, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        (
+            doc,
+            Ids {
+                panel,
+                control,
+                text,
+                outside,
+            },
+        )
+    }
+
+    fn click(doc: &mut BaseDocument, target: NodeId) {
+        let event = BlitzPointerEvent {
+            id: BlitzPointerId::Mouse,
+            is_primary: true,
+            coords: PointerCoords {
+                page_x: 0.0,
+                page_y: 0.0,
+                screen_x: 0.0,
+                screen_y: 0.0,
+                client_x: 0.0,
+                client_y: 0.0,
+            },
+            button: MouseEventButton::Main,
+            buttons: MouseEventButtons::None,
+            mods: Modifiers::default(),
+            details: PointerDetails::default(),
+            element: Default::default(),
+            active_pointers: Default::default(),
+        };
+        handle_click(doc, target, &event, &mut |_| {});
+    }
+
+    #[test]
+    fn clicking_a_tabindex_element_focuses_it() {
+        let (mut doc, ids) = make_doc();
+        click(&mut doc, ids.control);
+        assert_eq!(doc.focus_node_id, Some(ids.control));
+    }
+
+    #[test]
+    fn clicking_inside_a_focusable_container_focuses_the_container() {
+        let (mut doc, ids) = make_doc();
+        doc.set_focus_to(ids.control);
+        click(&mut doc, ids.text);
+        assert_eq!(doc.focus_node_id, Some(ids.panel));
+    }
+
+    #[test]
+    fn clicking_outside_anything_focusable_clears_focus() {
+        let (mut doc, ids) = make_doc();
+        doc.set_focus_to(ids.control);
+        click(&mut doc, ids.outside);
+        assert_eq!(doc.focus_node_id, None);
     }
 }
