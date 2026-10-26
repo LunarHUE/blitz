@@ -190,6 +190,15 @@ impl TextInputData {
         self.secret = Some(real);
     }
 
+    /// The value a form submits: a password's real text, or the editor's
+    /// committed text without any composition in progress.
+    pub fn form_value(&self) -> String {
+        match &self.secret {
+            Some(real) => real.clone(),
+            None => self.editor.text().to_string(),
+        }
+    }
+
     /// Whether this is a password input, which masks its text.
     pub fn is_secret(&self) -> bool {
         self.secret.is_some()
@@ -205,6 +214,11 @@ impl TextInputData {
     ) {
         if on == self.secret.is_some() {
             return;
+        }
+        // A composition in progress is provisional: end it first, so it
+        // neither becomes part of the value nor stays drawn in the clear.
+        if self.editor.is_composing() {
+            self.editor.driver(font_ctx, layout_ctx).clear_compose();
         }
         let value = self.value();
         let shown = if on {

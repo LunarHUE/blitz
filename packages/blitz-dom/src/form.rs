@@ -181,7 +181,11 @@ impl BaseDocument {
 /// Returns an EntryList containing all valid form control entries
 ///
 /// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#constructing-the-form-data-set
-fn construct_entry_list(doc: &BaseDocument, form_id: NodeId, submitter_id: NodeId) -> FormData {
+pub(crate) fn construct_entry_list(
+    doc: &BaseDocument,
+    form_id: NodeId,
+    submitter_id: NodeId,
+) -> FormData {
     let mut entry_list = FormData::new();
 
     let mut create_entry = |name: &str, value: EntryValue| {
@@ -314,7 +318,7 @@ fn construct_entry_list(doc: &BaseDocument, form_id: NodeId, submitter_id: NodeI
         }
         // Otherwise, create an entry with name and the value of the field element, and append it to entry list.
         else if let Some(text) = element.text_input_data() {
-            create_entry(name, text.value().as_str().into());
+            create_entry(name, text.form_value().as_str().into());
         } else if let Some(value) = element.attr(local_name!("value")) {
             create_entry(name, value.into());
         }

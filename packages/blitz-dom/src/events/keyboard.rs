@@ -924,4 +924,81 @@ mod secret_tests {
         assert_eq!(d.value(), "e\u{301}e!\u{301}");
         assert!(d.masked(3), "a committed mark joins too");
     }
+
+    #[test]
+    fn a_form_submits_without_a_composition_in_progress() {
+        // <form><input name="x" value="old"></form>, through the real
+        // entry list a submission builds.
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![]);
+        let form = m.create_element(qual_name!("form"), vec![]);
+        let input = m.create_element(
+            qual_name!("input"),
+            vec![
+                Attribute {
+                    name: qual_name!("name"),
+                    value: "x".into(),
+                },
+                Attribute {
+                    name: qual_name!("value"),
+                    value: "old".into(),
+                },
+            ],
+        );
+        m.append_children(form, &[input]);
+        m.append_children(body, &[form]);
+        m.append_children(html, &[body]);
+        m.append_children(root, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        assert!(doc.set_focus_to(input));
+        handle_ime_event(&mut doc, BlitzImeEvent::Preedit("か".into(), None), |_| {});
+        let raw = doc.nodes[input]
+            .element_data()
+            .unwrap()
+            .text_input_data()
+            .unwrap()
+            .editor
+            .raw_text()
+            .to_string();
+        assert!(raw.contains('か'), "composing: {raw}");
+        let entries = crate::form::construct_entry_list(&doc, form, input);
+        let x = entries.iter().find(|e| e.name == "x").expect("x submitted");
+        assert_eq!(x.value.as_ref(), "old", "the composition is not submitted");
+        // A password submits its real value.
+        handle_ime_event(
+            &mut doc,
+            BlitzImeEvent::Preedit(String::new(), None),
+            |_| {},
+        );
+        doc.mutate()
+            .set_attribute(input, qual_name!("type"), "password");
+        let entries = crate::form::construct_entry_list(&doc, form, input);
+        let x = entries.iter().find(|e| e.name == "x").unwrap();
+        assert_eq!(x.value.as_ref(), "old");
+    }
+
+    #[test]
+    fn turning_password_mid_composition_drops_the_provisional_text() {
+        let mut d = make();
+        let input = d.input;
+        d.doc
+            .mutate()
+            .set_attribute(input, qual_name!("type"), "text");
+        d.named(NamedKey::End);
+        d.ime(BlitzImeEvent::Preedit("か".into(), None));
+        d.doc
+            .mutate()
+            .set_attribute(input, qual_name!("type"), "password");
+        assert!(!d.data().editor.is_composing());
+        assert_eq!(d.value(), "old", "the composition is not part of the value");
+        assert!(d.masked(3), "{:?}", d.shown());
+        assert!(!d.shown().contains('か'));
+    }
 }
