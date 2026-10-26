@@ -369,7 +369,7 @@ mod read_only_tests {
         assert!(d.doc.set_focus_to(d.input));
         d.action("a");
         assert_eq!(d.selected(d.input).as_deref(), Some("fixed"));
-        d.action("c");
+        assert_eq!(d.action("c"), 0, "Copy is not an edit");
         assert_eq!(*d.clip.0.lock().unwrap(), "fixed");
         d.named(NamedKey::End);
         d.key(Key::Named(NamedKey::ArrowLeft), Modifiers::SHIFT);
@@ -378,6 +378,36 @@ mod read_only_tests {
         d.apple("moveToBeginningOfLine:");
         d.apple("moveRightAndModifySelection:");
         assert_eq!(d.selected(d.input).as_deref(), Some("f"));
+    }
+
+    #[test]
+    fn cut_with_nothing_selected_reports_no_input() {
+        let mut d = make();
+        *d.clip.0.lock().unwrap() = "before".into();
+        assert!(d.doc.set_focus_to(d.input));
+        d.named(NamedKey::End);
+        assert_eq!(d.action("x"), 0, "readonly, collapsed caret");
+        assert!(d.doc.set_focus_to(d.open));
+        d.char("a");
+        assert_eq!(d.action("x"), 0, "editable, collapsed caret");
+        assert_eq!(d.text(d.open), "a");
+        assert_eq!(*d.clip.0.lock().unwrap(), "before");
+        // With a selection, an editable field still cuts.
+        d.action("a");
+        assert_eq!(d.action("x"), 1);
+        assert_eq!(d.text(d.open), "");
+        assert_eq!(*d.clip.0.lock().unwrap(), "a");
+    }
+
+    #[test]
+    fn copy_reports_no_input_on_an_editable_field_either() {
+        let mut d = make();
+        assert!(d.doc.set_focus_to(d.open));
+        d.char("a");
+        d.action("a");
+        assert_eq!(d.action("c"), 0);
+        assert_eq!(*d.clip.0.lock().unwrap(), "a");
+        assert_eq!(d.text(d.open), "a");
     }
 
     #[test]

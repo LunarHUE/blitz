@@ -231,19 +231,24 @@ impl TextInputData {
         match event.key {
             Key::Character(c) if action_mod && matches!(c.as_str(), "c" | "x" | "v") => {
                 match c.to_lowercase().as_str() {
+                    // Copy changes nothing, so it reports no input.
                     "c" => {
                         if let Some(text) = driver.editor.selected_text() {
                             let _ = shell_provider.set_clipboard_text(text.to_owned());
                         }
+                        return None;
                     }
+                    // Cut with nothing selected changes nothing; on a
+                    // readonly input it copies and leaves the text.
                     "x" => {
-                        if let Some(text) = driver.editor.selected_text() {
-                            let _ = shell_provider.set_clipboard_text(text.to_owned());
-                            if read_only {
-                                return None;
-                            }
-                            driver.delete_selection()
+                        let Some(text) = driver.editor.selected_text() else {
+                            return None;
+                        };
+                        let _ = shell_provider.set_clipboard_text(text.to_owned());
+                        if read_only {
+                            return None;
                         }
+                        driver.delete_selection()
                     }
                     "v" if read_only => return None,
                     "v" => {
