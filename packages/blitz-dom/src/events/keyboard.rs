@@ -337,6 +337,42 @@ mod read_only_tests {
     }
 
     #[test]
+    fn a_textarea_starts_from_its_value_attribute() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![]);
+        let valued = m.create_element(
+            qual_name!("textarea"),
+            vec![attr(qual_name!("value"), "from value")],
+        );
+        let plain = m.create_element(qual_name!("textarea"), vec![]);
+        let child = m.create_text_node("from children");
+        m.append_children(plain, &[child]);
+        m.append_children(body, &[valued, plain]);
+        m.append_children(html, &[body]);
+        m.append_children(root, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        let text = |id: NodeId| {
+            doc.nodes[id]
+                .element_data()
+                .unwrap()
+                .text_input_data()
+                .unwrap()
+                .editor
+                .raw_text()
+                .to_string()
+        };
+        assert_eq!(text(valued), "from value");
+        assert_eq!(text(plain), "from children");
+    }
+
+    #[test]
     fn readonly_ignores_every_edit() {
         let mut d = make();
         assert!(d.doc.set_focus_to(d.input));

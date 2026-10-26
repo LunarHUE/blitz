@@ -893,8 +893,13 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         .map(|s| stylo_to_parley::base_direction(s.clone_direction(), s.clone_unicode_bidi()))
         .unwrap_or(parley::BaseDirection::Auto);
 
+    // A textarea's text is its children in HTML, but a framework that
+    // controls it (Dioxus sets `value`) has usually set the attribute
+    // before the editor exists, so that wins when present.
     let initial_text = if is_multiline {
-        node.text_content()
+        node.attr(local_name!("value"))
+            .map(str::to_string)
+            .unwrap_or_else(|| node.text_content())
     } else {
         node.attr(local_name!("value")).unwrap_or("").to_string()
     };
