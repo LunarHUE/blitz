@@ -74,8 +74,12 @@ pub(crate) fn handle_key_or_input_event<F: FnMut(DomEvent)>(
         let Some(element_data) = node.element_data_mut() else {
             return;
         };
-        // Read on every event, so toggling `readonly` takes effect at once.
-        let read_only = element_data.attr(local_name!("readonly")).is_some();
+        // Read on every event, so toggling either takes effect at once. A
+        // disabled input can still be focused by script, and editing key
+        // bindings never pass through a cancellable keydown, so it refuses
+        // edits here just as a readonly one does.
+        let read_only = element_data.attr(local_name!("readonly")).is_some()
+            || element_data.attr(local_name!("disabled")).is_some();
 
         if let Some(input_data) = element_data.text_input_data_mut() {
             let generated_event = match event {
@@ -370,6 +374,52 @@ mod read_only_tests {
         };
         assert_eq!(text(valued), "from value");
         assert_eq!(text(plain), "from children");
+    }
+
+    #[test]
+    fn a_focused_disabled_input_or_textarea_refuses_every_edit() {
+        let mut d = make();
+        let (input, area) = (d.input, d.open);
+        // Give the textarea text, with the caret at its start.
+        assert!(d.doc.set_focus_to(area));
+        d.char("a");
+        d.char("b");
+        d.named(NamedKey::Home);
+        assert_eq!(d.text(area), "ab");
+        // `input` loses readonly and gains disabled; `area` gets disabled.
+        d.doc
+            .mutate()
+            .clear_attribute(input, qual_name!("readonly"));
+        for id in [input, area] {
+            d.doc.mutate().set_attribute(id, qual_name!("disabled"), "");
+        }
+        for id in [input, area] {
+            // Script can still focus a disabled control.
+            assert!(d.doc.set_focus_to(id) || d.doc.focus_node_id == Some(id));
+            let before = d.text(id);
+            assert_eq!(d.char("z"), 0);
+            assert_eq!(d.named(NamedKey::Backspace), 0);
+            assert_eq!(d.named(NamedKey::Delete), 0);
+            assert_eq!(d.apple("deleteForward:"), 0);
+            assert_eq!(d.apple("deleteBackward:"), 0);
+            assert_eq!(d.apple("insertText:"), 0);
+            assert_eq!(d.text(id), before);
+        }
+        // Enabled again at runtime: it edits.
+        d.doc
+            .mutate()
+            .clear_attribute(input, qual_name!("disabled"));
+        assert!(d.doc.set_focus_to(input));
+        d.named(NamedKey::End);
+        assert_eq!(d.char("z"), 1);
+        assert_eq!(d.text(input), "fixedz");
+        // Disabled and readonly together refuse edits too.
+        d.doc
+            .mutate()
+            .set_attribute(area, qual_name!("readonly"), "");
+        assert!(d.doc.set_focus_to(area));
+        assert_eq!(d.apple("deleteForward:"), 0);
+        assert_eq!(d.text(area), "ab");
     }
 
     #[test]
