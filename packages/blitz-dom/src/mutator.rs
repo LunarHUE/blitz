@@ -70,6 +70,7 @@ impl Drop for DocumentMutator<'_> {
     fn drop(&mut self) {
         self.flush(); // Defined at bottom of file
         if self.mutations_occurred {
+            self.doc.layout_stale = true;
             self.doc.shell_provider.request_redraw();
         }
     }

@@ -166,6 +166,10 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
     }
 
     pub fn handle_ui_event(&mut self, event: UiEvent) {
+        // Input can arrive after an update changed the DOM and before the
+        // next frame laid it out: lay out first, so hit testing sees the
+        // document as it is.
+        self.doc.inner_mut().resolve_for_hit_testing();
         let doc = self.doc.inner();
 
         // A non-hovering pointer (finger) ends hover once it is lifted or cancelled

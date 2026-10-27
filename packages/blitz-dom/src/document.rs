@@ -306,6 +306,14 @@ pub struct BaseDocument {
     /// The elements carrying `:focus-within`: the focused node and its
     /// ancestors as of the last [`Self::sync_focus_within`].
     pub(crate) focus_within_chain: Vec<NodeId>,
+    /// The DOM changed since the last complete [`Self::resolve`]: the paint
+    /// tree hit testing walks may still list nodes that have gone (or ids
+    /// reused by new ones). Set by the mutator, cleared once resolve has
+    /// rebuilt the paint tree.
+    pub(crate) layout_stale: bool,
+    /// The animation time the last resolve ran at, for a resolve that input
+    /// asks for between frames.
+    pub(crate) last_resolve_time: f64,
     /// The node which is currently active (if any)
     pub(crate) active_node_id: Option<NodeId>,
     /// The node which recieved a mousedown event (if any)
@@ -509,6 +517,8 @@ impl BaseDocument {
             focus_node_id: None,
             pending_focus_changes: Vec::new(),
             focus_within_chain: Vec::new(),
+            layout_stale: false,
+            last_resolve_time: 0.0,
             active_node_id: None,
             mousedown_node_id: None,
             has_active_animations: false,
@@ -1940,11 +1950,26 @@ impl BaseDocument {
     /// [`hit`](Self::hit), also resolving the innermost overlay scrollbar
     /// thumb under the point (shares the traversal, so it costs nothing
     /// extra).
+    /// Bring layout and the paint tree up to date before hit testing, as a
+    /// browser does for `elementFromPoint`: input that arrives between an
+    /// update and the next frame must hit what is in the document now.
+    pub fn resolve_for_hit_testing(&mut self) {
+        if self.layout_stale {
+            self.resolve(self.last_resolve_time);
+        }
+    }
+
     pub(crate) fn hit_with_scrollbar(
         &self,
         x: f32,
         y: f32,
     ) -> (Option<HitResult>, Option<crate::node::ScrollbarRef>) {
+        // A paint tree older than the DOM can name nodes that have gone.
+        // Until a resolve rebuilds it, nothing is hit rather than something
+        // stale.
+        if self.layout_stale {
+            return (None, None);
+        }
         if TDocument::as_node(&self.root_node())
             .first_element_child()
             .is_none()

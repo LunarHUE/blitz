@@ -62,6 +62,7 @@ impl BaseDocument {
             return;
         }
 
+        self.last_resolve_time = current_time_for_animations;
         self.resolve_scroll_animation();
 
         // Drop scrollbar-activity entries whose fade-out has finished (also
@@ -122,6 +123,7 @@ impl BaseDocument {
         // this frame's transforms are picked up, and before damage is cleared.
         self.build_paint_tree(root_node_id);
         timer.record_time("paint_tree");
+        self.layout_stale = false;
 
         // Clear all damage and dirty flags, walking only subtrees which are
         // marked as (potentially) containing damage.
