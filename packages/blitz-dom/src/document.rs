@@ -1773,6 +1773,11 @@ impl BaseDocument {
         }
     }
 
+    /// Whether script has changed focus since the events were last taken.
+    pub fn has_pending_focus_events(&self) -> bool {
+        !self.pending_focus_changes.is_empty()
+    }
+
     /// The focus events for what script changed since the last call:
     /// blur and focusout on the node that had focus before the first
     /// change, then focus and focusin on the node that has it now. Moves
