@@ -298,6 +298,11 @@ pub struct BaseDocument {
     pub(crate) last_client_pointer_position: Option<taffy::Point<f32>>,
     /// The node which is currently focussed (if any)
     pub(crate) focus_node_id: Option<NodeId>,
+    /// Focus changes made by script (an embedder's `set_focus`), oldest
+    /// first: (previous, next). Script focus changes focus at once but has
+    /// no event dispatch of its own, so the embedder drains this after its
+    /// update and dispatches blur/focusout and focus/focusin in order.
+    pending_focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
     /// The elements carrying `:focus-within`: the focused node and its
     /// ancestors as of the last [`Self::sync_focus_within`].
     pub(crate) focus_within_chain: Vec<NodeId>,
@@ -502,6 +507,7 @@ impl BaseDocument {
             hover_node_is_text: false,
             last_client_pointer_position: None,
             focus_node_id: None,
+            pending_focus_changes: Vec::new(),
             focus_within_chain: Vec::new(),
             active_node_id: None,
             mousedown_node_id: None,
@@ -1745,6 +1751,59 @@ impl BaseDocument {
     pub fn set_mousedown_node_id(&mut self, node_id: Option<NodeId>) {
         self.mousedown_node_id = node_id.and_then(|id| self.nearest_non_anonymous_ancestor(id));
     }
+    /// Focus `node_id` on behalf of script, recording the change so the
+    /// embedder can dispatch its focus events later. Returns whether focus
+    /// moved.
+    pub fn set_focus_by_script(&mut self, node_id: NodeId) -> bool {
+        let before = self.focus_node_id;
+        let moved = self.set_focus_to(node_id);
+        if moved {
+            self.pending_focus_changes
+                .push((before, self.focus_node_id));
+        }
+        moved
+    }
+
+    /// Clear focus on behalf of script, recording the change.
+    pub fn clear_focus_by_script(&mut self) {
+        let before = self.focus_node_id;
+        self.clear_focus();
+        if before.is_some() {
+            self.pending_focus_changes.push((before, None));
+        }
+    }
+
+    /// The focus events for what script changed since the last call:
+    /// blur and focusout on the node that had focus before the first
+    /// change, then focus and focusin on the node that has it now. Moves
+    /// in between (A to B to C before a dispatch) collapse to their net
+    /// change, since B no longer has focus when the events go out; a move
+    /// back to where it started sends nothing. A node that has left the
+    /// document gets none.
+    pub fn take_pending_focus_events(&mut self) -> Vec<blitz_traits::events::DomEvent> {
+        use blitz_traits::events::{BlitzFocusEvent, DomEvent, DomEventData};
+        let changes = std::mem::take(&mut self.pending_focus_changes);
+        let (Some(first), Some(last)) = (changes.first(), changes.last()) else {
+            return Vec::new();
+        };
+        let (old, new) = (first.0, last.1);
+        if old == new {
+            return Vec::new();
+        }
+        let live =
+            |doc: &Self, id: NodeId| doc.get_node(id).is_some_and(|n| n.flags.is_in_document());
+        let mut events = Vec::new();
+        if let Some(old) = old.filter(|o| live(self, *o)) {
+            events.push(DomEvent::new(old, DomEventData::Blur(BlitzFocusEvent)));
+            events.push(DomEvent::new(old, DomEventData::FocusOut(BlitzFocusEvent)));
+        }
+        if let Some(new) = new.filter(|n| live(self, *n)) {
+            events.push(DomEvent::new(new, DomEventData::Focus(BlitzFocusEvent)));
+            events.push(DomEvent::new(new, DomEventData::FocusIn(BlitzFocusEvent)));
+        }
+        events
+    }
+
     pub fn set_focus_to(&mut self, focus_node_id: NodeId) -> bool {
         let Some(focus_node_id) = self.nearest_non_anonymous_ancestor(focus_node_id) else {
             return false;
