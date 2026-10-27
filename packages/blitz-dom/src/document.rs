@@ -302,7 +302,7 @@ pub struct BaseDocument {
     /// first: (previous, next). Script focus changes focus at once but has
     /// no event dispatch of its own, so the embedder drains this after its
     /// update and dispatches blur/focusout and focus/focusin in order.
-    pending_focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
+    pending_focus_changes: Vec<(Option<NodeId>, Option<NodeId>, bool)>,
     /// The elements carrying `:focus-within`: the focused node and its
     /// ancestors as of the last [`Self::sync_focus_within`].
     pub(crate) focus_within_chain: Vec<NodeId>,
@@ -1752,24 +1752,25 @@ impl BaseDocument {
         self.mousedown_node_id = node_id.and_then(|id| self.nearest_non_anonymous_ancestor(id));
     }
     /// Focus `node_id` on behalf of script, recording the change so the
-    /// embedder can dispatch its focus events later. Returns whether focus
-    /// moved.
-    pub fn set_focus_by_script(&mut self, node_id: NodeId) -> bool {
+    /// embedder can dispatch its focus events later. `counted` is the
+    /// embedder's: whether whoever moved focus already counted the move,
+    /// passed back with the events. Returns whether focus moved.
+    pub fn set_focus_by_script(&mut self, node_id: NodeId, counted: bool) -> bool {
         let before = self.focus_node_id;
         let moved = self.set_focus_to(node_id);
         if moved {
             self.pending_focus_changes
-                .push((before, self.focus_node_id));
+                .push((before, self.focus_node_id, counted));
         }
         moved
     }
 
     /// Clear focus on behalf of script, recording the change.
-    pub fn clear_focus_by_script(&mut self) {
+    pub fn clear_focus_by_script(&mut self, counted: bool) {
         let before = self.focus_node_id;
         self.clear_focus();
         if before.is_some() {
-            self.pending_focus_changes.push((before, None));
+            self.pending_focus_changes.push((before, None, counted));
         }
     }
 
@@ -1784,16 +1785,17 @@ impl BaseDocument {
     /// in between (A to B to C before a dispatch) collapse to their net
     /// change, since B no longer has focus when the events go out; a move
     /// back to where it started sends nothing. A node that has left the
-    /// document gets none.
-    pub fn take_pending_focus_events(&mut self) -> Vec<blitz_traits::events::DomEvent> {
+    /// document gets none. With them, whether the move that put focus
+    /// where it is now was a counted one (see [`Self::set_focus_by_script`]).
+    pub fn take_pending_focus_events(&mut self) -> (Vec<blitz_traits::events::DomEvent>, bool) {
         use blitz_traits::events::{BlitzFocusEvent, DomEvent, DomEventData};
         let changes = std::mem::take(&mut self.pending_focus_changes);
         let (Some(first), Some(last)) = (changes.first(), changes.last()) else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
-        let (old, new) = (first.0, last.1);
+        let (old, new, counted) = (first.0, last.1, last.2);
         if old == new {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         let live =
             |doc: &Self, id: NodeId| doc.get_node(id).is_some_and(|n| n.flags.is_in_document());
@@ -1808,7 +1810,7 @@ impl BaseDocument {
             events.push(DomEvent::new(new, DomEventData::Focus(BlitzFocusEvent)));
             events.push(DomEvent::new(new, DomEventData::FocusIn(BlitzFocusEvent)));
         }
-        events
+        (events, counted)
     }
 
     pub fn set_focus_to(&mut self, focus_node_id: NodeId) -> bool {
