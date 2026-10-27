@@ -1797,7 +1797,9 @@ impl BaseDocument {
             events.push(DomEvent::new(old, DomEventData::Blur(BlitzFocusEvent)));
             events.push(DomEvent::new(old, DomEventData::FocusOut(BlitzFocusEvent)));
         }
-        if let Some(new) = new.filter(|n| live(self, *n)) {
+        // Only to a node that has focus now: if something moved it since
+        // (an embedder's own `set_focus_to`), that move is not script's.
+        if let Some(new) = new.filter(|n| live(self, *n) && self.focus_node_id == Some(*n)) {
             events.push(DomEvent::new(new, DomEventData::Focus(BlitzFocusEvent)));
             events.push(DomEvent::new(new, DomEventData::FocusIn(BlitzFocusEvent)));
         }
