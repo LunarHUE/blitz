@@ -641,6 +641,11 @@ impl DocumentMutator<'_> {
             {
                 data.hint |= RestyleHint::restyle_subtree();
             }
+            // Its children change, so its layout children and paint
+            // children must be rebuilt, as `remove_node` asks for: without
+            // this an incremental resolve keeps lists naming the dropped
+            // nodes.
+            parent.insert_damage(ALL_DAMAGE);
             // Mark ancestors dirty so the style traversal visits this subtree.
             parent.mark_ancestors_dirty();
         }
