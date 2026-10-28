@@ -314,6 +314,10 @@ pub struct BaseDocument {
     /// The animation time the last resolve ran at, for a resolve that input
     /// asks for between frames.
     pub(crate) last_resolve_time: f64,
+    /// Whether resolve ends by re-resolving hover from the last pointer
+    /// position. Off only for a resolve input asks for when that input
+    /// reconciles hover itself, with its boundary events.
+    pub(crate) refresh_hover_on_resolve: bool,
     /// The node which is currently active (if any)
     pub(crate) active_node_id: Option<NodeId>,
     /// The node which recieved a mousedown event (if any)
@@ -519,6 +523,7 @@ impl BaseDocument {
             focus_within_chain: Vec::new(),
             layout_stale: false,
             last_resolve_time: 0.0,
+            refresh_hover_on_resolve: true,
             active_node_id: None,
             mousedown_node_id: None,
             has_active_animations: false,
@@ -1953,9 +1958,17 @@ impl BaseDocument {
     /// Bring layout and the paint tree up to date before hit testing, as a
     /// browser does for `elementFromPoint`: input that arrives between an
     /// update and the next frame must hit what is in the document now.
-    pub fn resolve_for_hit_testing(&mut self) {
+    ///
+    /// `refresh_hover` as in a frame's resolve: hover re-resolved from the
+    /// last pointer position, silently. Pass false for input that sets hover
+    /// itself (a pointer move, press, release, cancel or leave), so the
+    /// change goes out with its leave and enter events instead of being
+    /// taken here without them.
+    pub fn resolve_for_hit_testing(&mut self, refresh_hover: bool) {
         if self.layout_stale {
+            self.refresh_hover_on_resolve = refresh_hover;
             self.resolve(self.last_resolve_time);
+            self.refresh_hover_on_resolve = true;
         }
     }
 

@@ -138,7 +138,9 @@ impl BaseDocument {
         // pass (the clearing loop would otherwise wipe them). Any resulting
         // restyle is picked up on the next resolve pass; a redraw is requested
         // if the hovered node actually changes.
-        self.refresh_hover();
+        if self.refresh_hover_on_resolve {
+            self.refresh_hover();
+        }
 
         let mut subdoc_is_animating = false;
         for &node_id in &self.sub_document_nodes {

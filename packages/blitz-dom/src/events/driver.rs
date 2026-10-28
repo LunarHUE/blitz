@@ -168,8 +168,18 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
     pub fn handle_ui_event(&mut self, event: UiEvent) {
         // Input can arrive after an update changed the DOM and before the
         // next frame laid it out: lay out first, so hit testing sees the
-        // document as it is.
-        self.doc.inner_mut().resolve_for_hit_testing();
+        // document as it is. Pointer input sets hover itself below, with
+        // leave and enter events, so that layout mustn't move hover first;
+        // other input (a key, the wheel) takes hover as a frame leaves it.
+        let sets_hover = matches!(
+            event,
+            UiEvent::PointerMove(_)
+                | UiEvent::PointerDown(_)
+                | UiEvent::PointerUp(_)
+                | UiEvent::PointerCancel(_)
+                | UiEvent::PointerLeave(_)
+        );
+        self.doc.inner_mut().resolve_for_hit_testing(!sets_hover);
         let doc = self.doc.inner();
 
         // A non-hovering pointer (finger) ends hover once it is lifted or cancelled
