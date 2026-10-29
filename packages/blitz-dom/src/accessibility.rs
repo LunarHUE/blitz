@@ -256,6 +256,7 @@ fn role_from_name(name: &str) -> Option<Role> {
         "checkbox" => Some(Role::CheckBox),
         "dialog" => Some(Role::Dialog),
         "gridcell" => Some(Role::GridCell),
+        "cell" => Some(Role::Cell),
         "link" => Some(Role::Link),
         "log" => Some(Role::Log),
         "marquee" => Some(Role::Marquee),
@@ -299,6 +300,7 @@ fn role_from_name(name: &str) -> Option<Role> {
         "row" => Some(Role::Row),
         "rowgroup" => Some(Role::RowGroup),
         "rowheader" => Some(Role::RowHeader),
+        "table" => Some(Role::Table),
         "toolbar" => Some(Role::Toolbar),
         "application" => Some(Role::Application),
         "banner" => Some(Role::Banner),
@@ -429,5 +431,20 @@ fn role_from_element_data(element_data: &ElementData) -> Option<Role> {
             }
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_roles_map_from_aria_names() {
+        assert_eq!(role_from_name("cell"), Some(Role::Cell));
+        assert_eq!(role_from_name("gridcell"), Some(Role::GridCell));
+        assert_eq!(role_from_name("row"), Some(Role::Row));
+        assert_eq!(role_from_name("rowgroup"), Some(Role::RowGroup));
+        assert_eq!(role_from_name("columnheader"), Some(Role::ColumnHeader));
+        assert_eq!(role_from_name("table"), Some(Role::Table));
     }
 }
