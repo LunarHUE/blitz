@@ -165,9 +165,7 @@ impl ShellProvider for BlitzShellProvider {
         )
     ))]
     fn get_clipboard_text(&self) -> Result<String, blitz_traits::shell::ClipboardError> {
-        let mut cb = arboard::Clipboard::new().unwrap();
-        cb.get_text()
-            .map_err(|_| blitz_traits::shell::ClipboardError)
+        system_clipboard::read_with(arboard::Clipboard::new)
     }
 
     #[cfg(all(
@@ -183,9 +181,7 @@ impl ShellProvider for BlitzShellProvider {
         )
     ))]
     fn set_clipboard_text(&self, text: String) -> Result<(), blitz_traits::shell::ClipboardError> {
-        let mut cb = arboard::Clipboard::new().unwrap();
-        cb.set_text(text.to_owned())
-            .map_err(|_| blitz_traits::shell::ClipboardError)
+        system_clipboard::write_with(arboard::Clipboard::new, text)
     }
 
     #[cfg(all(
@@ -215,5 +211,82 @@ impl ShellProvider for BlitzShellProvider {
             dialog.pick_file().map(|file| vec![file])
         };
         files.unwrap_or_default()
+    }
+}
+
+/// The system clipboard, opened for each read or write. Opening fails
+/// without a session to serve it, such as native Wayland with no XWayland,
+/// since arboard is built here for X11 only. That failure comes back as a
+/// `ClipboardError`, like a failed read or write, instead of a panic.
+#[cfg(all(
+    feature = "clipboard",
+    any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )
+))]
+mod system_clipboard {
+    use blitz_traits::shell::ClipboardError;
+
+    pub(crate) fn read_with(
+        open: impl FnOnce() -> Result<arboard::Clipboard, arboard::Error>,
+    ) -> Result<String, ClipboardError> {
+        open()
+            .and_then(|mut cb| cb.get_text())
+            .map_err(|_| ClipboardError)
+    }
+
+    pub(crate) fn write_with(
+        open: impl FnOnce() -> Result<arboard::Clipboard, arboard::Error>,
+        text: String,
+    ) -> Result<(), ClipboardError> {
+        open()
+            .and_then(|mut cb| cb.set_text(text))
+            .map_err(|_| ClipboardError)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn unavailable() -> Result<arboard::Clipboard, arboard::Error> {
+            Err(arboard::Error::ClipboardNotSupported)
+        }
+
+        #[test]
+        fn a_clipboard_that_cannot_open_is_an_error_for_reads_and_writes() {
+            assert!(read_with(unavailable).is_err());
+            assert!(write_with(unavailable, "text".into()).is_err());
+        }
+
+        /// The real constructor with no X11 or Wayland display to reach. It
+        /// runs in a child process with those variables removed, so this
+        /// process's environment is never changed.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn without_a_display_the_real_clipboard_is_an_error_not_a_panic() {
+            const CHILD: &str = "BLITZ_SHELL_CLIPBOARD_CHILD";
+            const NAME: &str = "system_clipboard::tests::without_a_display_the_real_clipboard_is_an_error_not_a_panic";
+            if std::env::var_os(CHILD).is_some() {
+                assert!(read_with(arboard::Clipboard::new).is_err());
+                assert!(write_with(arboard::Clipboard::new, "text".into()).is_err());
+                return;
+            }
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .env_remove("DISPLAY")
+                .env_remove("WAYLAND_DISPLAY")
+                .output()
+                .unwrap();
+            let log = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "child failed:\n{log}");
+            assert!(log.contains("1 passed"), "child ran no test:\n{log}");
+        }
     }
 }
