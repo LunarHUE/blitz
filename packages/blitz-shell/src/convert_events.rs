@@ -1,10 +1,10 @@
 use blitz_traits::events::{
-    BlitzImeEvent, BlitzKeyEvent, BlitzPointerId, KeyState, PointerDetails,
+    BlitzImeEvent, BlitzKeyEvent, BlitzPointerId, KeyState, MouseEventButton, PointerDetails,
 };
 use blitz_traits::shell::ColorScheme;
 use keyboard_types::{Code, Key, Modifiers, NamedKey};
 use winit::event::KeyEvent as WinitKeyEvent;
-use winit::event::{ButtonSource, ElementState};
+use winit::event::{ButtonSource, ElementState, MouseButton};
 use winit::event::{Ime, PointerKind, PointerSource};
 use winit::keyboard::Key as WinitKey;
 use winit::keyboard::ModifiersState as WinitModifiers;
@@ -117,6 +117,25 @@ pub(crate) fn button_source_to_blitz(source: &ButtonSource) -> BlitzPointerId {
     }
 }
 
+/// Maps a winit button to its DOM `MouseEvent.button` value. Winit already
+/// normalises the side buttons on every backend (Win32 XBUTTON1/2, X11
+/// buttons 8/9, evdev BTN_SIDE/BTN_EXTRA) to `Back` and `Forward`; X11
+/// buttons 4-7 are wheel motion and never reach here.
+pub(crate) fn button_source_to_blitz_button(source: &ButtonSource) -> MouseEventButton {
+    match source {
+        ButtonSource::Mouse(button) => match button {
+            MouseButton::Left => MouseEventButton::Main,
+            MouseButton::Right => MouseEventButton::Secondary,
+            MouseButton::Middle => MouseEventButton::Auxiliary,
+            MouseButton::Back => MouseEventButton::Fourth,
+            MouseButton::Forward => MouseEventButton::Fifth,
+            // TODO: handle other button types
+            _ => MouseEventButton::Auxiliary,
+        },
+        _ => MouseEventButton::Main,
+    }
+}
+
 pub(crate) fn pointer_source_to_blitz_details(source: &PointerSource) -> PointerDetails {
     match source {
         PointerSource::Mouse => PointerDetails::default(),
@@ -175,5 +194,21 @@ pub(crate) fn winit_key_to_kbt_key(winit_key: &WinitKey) -> Key {
         WinitKey::Character(c) => Key::Character(c.to_string()),
         WinitKey::Unidentified(_) => Key::Named(NamedKey::Unidentified),
         WinitKey::Dead(_) => Key::Named(NamedKey::Dead),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn side_buttons_map_to_dom_fourth_and_fifth() {
+        let map = |b| button_source_to_blitz_button(&ButtonSource::Mouse(b));
+        assert_eq!(map(MouseButton::Left), MouseEventButton::Main);
+        assert_eq!(map(MouseButton::Right), MouseEventButton::Secondary);
+        assert_eq!(map(MouseButton::Middle), MouseEventButton::Auxiliary);
+        assert_eq!(map(MouseButton::Back), MouseEventButton::Fourth);
+        assert_eq!(map(MouseButton::Forward), MouseEventButton::Fifth);
+        assert_eq!(map(MouseButton::Button6), MouseEventButton::Auxiliary);
     }
 }

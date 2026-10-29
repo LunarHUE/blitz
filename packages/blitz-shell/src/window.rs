@@ -1,6 +1,6 @@
 use crate::BlitzShellProvider;
 use crate::convert_events::{
-    button_source_to_blitz, color_scheme_to_theme, pointer_kind_to_blitz, pointer_source_to_blitz,
+    button_source_to_blitz, button_source_to_blitz_button, color_scheme_to_theme, pointer_kind_to_blitz, pointer_source_to_blitz,
     pointer_source_to_blitz_details, theme_to_color_scheme, winit_ime_to_blitz,
     winit_key_event_to_blitz, winit_modifiers_to_kbt_modifiers,
 };
@@ -21,7 +21,7 @@ use std::any::Any;
 use std::sync::Arc;
 use std::task::Waker;
 use web_time::Instant;
-use winit::event::{ButtonSource, ElementState, MouseButton};
+use winit::event::ElementState;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Theme, WindowAttributes, WindowId};
 use winit::{event::Modifiers, event::WindowEvent, keyboard::KeyCode, window::Window};
@@ -772,16 +772,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                 let id = button_source_to_blitz(&button);
                 let coords = self.pointer_coords(position);
                 self.pointer_pos = position;
-                let button = match &button {
-                    ButtonSource::Mouse(mouse_button) => match mouse_button {
-                        MouseButton::Left => MouseEventButton::Main,
-                        MouseButton::Right => MouseEventButton::Secondary,
-                        MouseButton::Middle => MouseEventButton::Auxiliary,
-                        // TODO: handle other button types
-                        _ => MouseEventButton::Auxiliary,
-                    }
-                    _ => MouseEventButton::Main,
-                };
+                let button = button_source_to_blitz_button(&button);
 
                 match state {
                     ElementState::Pressed => self.buttons |= button.into(),
