@@ -61,6 +61,15 @@ use style::values::computed::text::TextAlign as StyloTextAlign;
 
 impl crate::document::BaseDocument {
     pub fn resolve_stylist(&mut self, now: f64) {
+        // After the traversal, once its stylesheet guards are released.
+        for node_id in self.restyle(now) {
+            crate::layout::construct::refresh_placeholder_style(self, node_id);
+        }
+    }
+
+    /// The style traversal. Returns the text inputs whose placeholder needs
+    /// restyling (see `refresh_placeholder_style`).
+    fn restyle(&mut self, now: f64) -> Vec<NodeId> {
         style::thread_state::enter(ThreadState::LAYOUT);
 
         let guard = &self.guard;
@@ -143,6 +152,7 @@ impl crate::document::BaseDocument {
         let token = RecalcStyle::pre_traverse(root, &context);
 
         let mut nodes_needing_style_image_flush = Vec::new();
+        let mut nodes_needing_placeholder_refresh = Vec::new();
         if token.should_traverse() {
             // Style the elements, resolving their data
             let mut traverser = RecalcStyle::new(context);
@@ -153,6 +163,12 @@ impl crate::document::BaseDocument {
             style::driver::traverse_dom(&traverser, token, rayon_pool);
             nodes_needing_style_image_flush =
                 std::mem::take(traverser.nodes_needing_style_image_flush.get_mut().unwrap());
+            nodes_needing_placeholder_refresh = std::mem::take(
+                traverser
+                    .nodes_needing_placeholder_refresh
+                    .get_mut()
+                    .unwrap(),
+            );
         }
         self.pending_style_image_nodes
             .extend(nodes_needing_style_image_flush);
@@ -177,11 +193,14 @@ impl crate::document::BaseDocument {
         }
         sets.retain(|_, state| !state.is_empty());
         self.has_active_animations = sets.values().any(|state| state.needs_animation_ticks());
+        drop(sets);
 
         // Maybe run garbage collection. Stylo has internal to determine whether to run or not.
         self.stylist.rule_tree().maybe_gc();
 
         style::thread_state::exit(ThreadState::LAYOUT);
+
+        nodes_needing_placeholder_refresh
     }
 
     /// Compute the style of an element which the regular style traversal
@@ -1328,6 +1347,9 @@ pub struct RecalcStyle<'a> {
     /// dedicated storage on the node (see `flush_image_layers_from_style`)
     /// because their style changed during this traversal.
     nodes_needing_style_image_flush: Mutex<Vec<NodeId>>,
+    /// Text inputs with a placeholder that this traversal restyled, whose
+    /// `::placeholder` style may have changed with no box reconstruction.
+    nodes_needing_placeholder_refresh: Mutex<Vec<NodeId>>,
 }
 
 impl<'a> RecalcStyle<'a> {
@@ -1335,6 +1357,7 @@ impl<'a> RecalcStyle<'a> {
         RecalcStyle {
             context,
             nodes_needing_style_image_flush: Mutex::new(Vec::new()),
+            nodes_needing_placeholder_refresh: Mutex::new(Vec::new()),
         }
     }
 }
@@ -1353,6 +1376,23 @@ impl<'dom> DomTraversal<BlitzNode<'dom>> for RecalcStyle<'_> {
             recalc_style_at(self, context, el, &mut data, note_child);
 
             sync_pseudo_element_styles(el, &data, &self.nodes_needing_style_image_flush);
+
+            // Restyled this traversal, even to an equal style: what changed
+            // may be only a `::placeholder` rule, such as one under `:focus`.
+            let styled = !data
+                .flags
+                .contains(style::data::ElementDataFlags::TRAVERSED_WITHOUT_STYLING);
+            if styled
+                && el
+                    .element_data()
+                    .and_then(|e| e.text_input_data())
+                    .is_some_and(|d| d.placeholder.is_some())
+            {
+                self.nodes_needing_placeholder_refresh
+                    .lock()
+                    .unwrap()
+                    .push(el.id);
+            }
 
             if !data.damage.is_empty() {
                 // Mark the ancestor chain so that the damage propagation pass
