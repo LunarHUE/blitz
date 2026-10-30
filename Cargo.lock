@@ -939,6 +939,7 @@ dependencies = [
  "thin-vec",
  "thread_local",
  "tracing",
+ "unicode-segmentation",
  "url",
  "usvg",
  "web-time",
