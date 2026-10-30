@@ -421,3 +421,42 @@ fn a_textarea_shows_it_until_text_arrives() {
     h.type_text("x");
     assert_eq!(count(&render(&mut h), Hue::Red).0, 0, "typed: gone");
 }
+
+#[test]
+fn a_viewport_resize_restyles_viewport_units() {
+    // 2.5vw is 8px at 320px wide and 16px at 640px. The input itself uses
+    // no viewport units, so nothing but the hint depends on the width.
+    let mut h = page(
+        r#"<style>#a::placeholder { font-size: 2.5vw; }</style>
+           <input id="a" placeholder="Search by name">"#,
+    );
+    // Rows of the render holding hint pixels: the glyphs' height.
+    let glyph_rows = |h: &mut Harness<HtmlDocument>, w: u32| {
+        h.pump();
+        let mut doc = h.base_mut();
+        let buf = render_to_buffer::<VelloCpuImageRenderer, _>(
+            |scene| paint_scene(scene, &mut doc, 1.0, w, H, 0, 0),
+            w,
+            H,
+        );
+        let rows: std::collections::BTreeSet<_> = buf
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(_, px)| is(&px[..], Hue::Red))
+            .map(|(i, _)| i / w as usize)
+            .collect();
+        rows.len()
+    };
+    let narrow = glyph_rows(&mut h, W);
+    assert!(narrow > 2, "an 8px hint draws ({narrow} rows)");
+    assert_eq!(h.base().get_viewport().hidpi_scale, 1.0);
+    h.set_viewport_size(W * 2, H);
+    assert_eq!(h.base().get_viewport().hidpi_scale, 1.0, "same scale");
+    let wide = glyph_rows(&mut h, W * 2);
+    assert!(
+        wide as f32 > narrow as f32 * 1.5,
+        "the hint grows with the viewport: {narrow} rows at 320px, {wide} at 640px"
+    );
+}

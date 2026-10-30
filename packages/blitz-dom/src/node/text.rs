@@ -95,6 +95,9 @@ pub(crate) struct Placeholder {
     /// Painted for every glyph. The runs' brush is the input's node, whose
     /// own colour is the value's.
     pub(crate) color: style::color::AbsoluteColor,
+    /// Whether that style used viewport units, so a viewport resize must
+    /// restyle the hint even when the input's own style doesn't change.
+    pub(crate) uses_viewport_units: bool,
 }
 
 /// The character a password input shows for each grapheme of its text.
