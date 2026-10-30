@@ -2336,6 +2336,27 @@ impl BaseDocument {
                 style::invalidation::viewport_units::invalidate(root);
             }
         }
+
+        // A placeholder's `::placeholder` style is cascaded lazily and its
+        // flags aren't on the input, so the invalidation above misses it.
+        // Restyling the input refreshes the hint (see
+        // `refresh_placeholder_style`).
+        if viewport_size_changed {
+            let ids: Vec<_> = self
+                .nodes
+                .iter()
+                .filter(|(_, n)| {
+                    n.element_data()
+                        .and_then(|el| el.text_input_data())
+                        .and_then(|d| d.placeholder.as_ref())
+                        .is_some_and(|p| p.uses_viewport_units)
+                })
+                .map(|(_, n)| n.id)
+                .collect();
+            for id in ids {
+                self.nodes[id].set_restyle_hint(RestyleHint::RESTYLE_SELF);
+            }
+        }
     }
 
     pub fn stylist_device(&mut self) -> &Device {

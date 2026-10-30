@@ -956,12 +956,16 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
     editor.set_alignment(alignment);
     editor.set_base_direction(base_direction);
 
-    text_input_data.placeholder = placeholder.map(|(text, style, color)| {
+    text_input_data.placeholder = placeholder.map(|(text, style, color, uses_viewport_units)| {
         let mut editor = Box::new(parley::PlainEditor::new(16.0));
         editor.set_text(&text);
         editor.set_scale(scale);
         editor.set_width(None);
-        let mut placeholder = Placeholder { editor, color };
+        let mut placeholder = Placeholder {
+            editor,
+            color,
+            uses_viewport_units,
+        };
         style_placeholder(
             &mut placeholder,
             style,
@@ -1033,7 +1037,9 @@ pub(crate) fn refresh_placeholder_style(doc: &mut BaseDocument, input_element_id
     else {
         return;
     };
-    let Some((_, style, color)) = placeholder_parts(doc, input_element_id, is_multiline) else {
+    let Some((_, style, color, uses_viewport_units)) =
+        placeholder_parts(doc, input_element_id, is_multiline)
+    else {
         return;
     };
     let node = &mut doc.nodes[input_element_id];
@@ -1065,6 +1071,7 @@ pub(crate) fn refresh_placeholder_style(doc: &mut BaseDocument, input_element_id
         (alignment, base_direction),
         is_multiline,
     );
+    placeholder.uses_viewport_units = uses_viewport_units;
     placeholder
         .editor
         .refresh_layout(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx);
@@ -1086,7 +1093,9 @@ fn placeholder_parts(
     String,
     parley::TextStyle<'static, 'static, TextBrush>,
     style::color::AbsoluteColor,
+    bool,
 )> {
+    use style::computed_value_flags::ComputedValueFlags;
     use style::selector_parser::PseudoElement;
 
     let node = &doc.nodes[input_element_id];
@@ -1114,20 +1123,24 @@ fn placeholder_parts(
     // With no rule for it at all, the UA sheet included, the hint takes
     // the value's style at Firefox's default `::placeholder` opacity so it
     // still doesn't read as a value.
-    let (style, color) = match &pseudo {
+    // The fallback is the input's own style, which the input's restyles
+    // already track, viewport units included.
+    let (style, color, uses_viewport_units) = match &pseudo {
         Some(p) => (
             stylo_to_parley::style(input_element_id, p),
             p.get_inherited_text().color,
+            p.flags.contains(ComputedValueFlags::USES_VIEWPORT_UNITS),
         ),
         None => {
             let c = primary.get_inherited_text().color;
             (
                 stylo_to_parley::style(input_element_id, &primary),
                 c.with_alpha(c.alpha * 0.54),
+                false,
             )
         }
     };
-    Some((text, style, color))
+    Some((text, style, color, uses_viewport_units))
 }
 
 fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: NodeId) {
