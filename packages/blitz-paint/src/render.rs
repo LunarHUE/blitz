@@ -936,6 +936,22 @@ impl ElementCx<'_, '_> {
             let transform = self.transform
                 * Affine::translate((pos.x * self.scale - scroll_x, pos.y * self.scale - scroll_y));
 
+            // The placeholder, while the input holds no text. It is under
+            // the caret, which a focused empty input still draws.
+            if let Some((layout, color)) = input_data.shown_placeholder() {
+                let mut draw_text_context = self.context.draw_text_context.borrow_mut();
+                crate::text::stroke_text_in(
+                    scene,
+                    layout.lines(),
+                    self.context.dom,
+                    transform,
+                    self.scale,
+                    self.node.id,
+                    &mut draw_text_context,
+                    Some(color.as_srgb_color()),
+                );
+            }
+
             if self.node.is_focussed() {
                 // Render selection/caret
                 for (rect, _line_idx) in input_data.editor.selection_geometry().iter() {

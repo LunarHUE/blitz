@@ -154,6 +154,14 @@ impl BaseDocument {
             if let Some(aria_description) = element_data.attr(local_name!("aria-description")) {
                 builder.set_description(aria_description);
             }
+            // A text input's hint. It is never the input's name: a field
+            // still needs its label.
+            if let Some(placeholder) = element_data
+                .text_input_data()
+                .and_then(|d| d.placeholder_text())
+            {
+                builder.set_placeholder(placeholder);
+            }
             if let Some(aria_level) = element_data.attr(local_name!("aria-level"))
                 && let Ok(aria_level) = aria_level.parse::<usize>()
                 // Accesskit levels are 0-based, while ARIA levels are 1-based
