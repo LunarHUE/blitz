@@ -11,6 +11,7 @@ use style::{
     computed_values::position::T as PositionProperty,
     data::ElementData as StyloElementData,
     shared_lock::StylesheetGuards,
+    stylist::RuleInclusion,
     values::{
         computed::{Content, ContentItem, Display, Float},
         specified::box_::{DisplayInside, DisplayOutside},
@@ -24,8 +25,8 @@ use crate::{
         CONSTRUCT_BOX, CONSTRUCT_DESCENDENT, CONSTRUCT_FC, sort_layout_children_by_order,
     },
     node::{
-        ListItemLayout, ListItemLayoutPosition, Marker, NodeFlags, NodeKind, SpecialElementData,
-        TextBrush, TextInputData, TextLayout,
+        ListItemLayout, ListItemLayoutPosition, Marker, NodeFlags, NodeKind, Placeholder,
+        SpecialElementData, TextBrush, TextInputData, TextLayout,
     },
     qual_name, stylo_to_parley,
     traversal::{iter_children, iter_children_and_pseudos},
@@ -881,6 +882,8 @@ fn collect_complex_layout_children(
 }
 
 fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multiline: bool) {
+    let placeholder = placeholder_parts(doc, input_element_id, is_multiline);
+    let scale = doc.viewport.scale_f64() as f32;
     let node = &mut doc.nodes[input_element_id];
     let parley_style = node
         .primary_styles()
@@ -925,8 +928,10 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         unreachable!();
     };
 
+    let value_line_height = parley_style.line_height;
+    let value_brush = parley_style.brush;
     let editor = &mut text_input_data.editor;
-    editor.set_scale(doc.viewport.scale_f64() as f32);
+    editor.set_scale(scale);
     editor.set_width(None);
 
     let styles = editor.edit_styles();
@@ -951,7 +956,191 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
     editor.set_alignment(alignment);
     editor.set_base_direction(base_direction);
 
-    editor.refresh_layout(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx);
+    text_input_data.placeholder = placeholder.map(|(text, style, color, uses_viewport_units)| {
+        let mut editor = Box::new(parley::PlainEditor::new(16.0));
+        editor.set_text(&text);
+        editor.set_scale(scale);
+        editor.set_width(None);
+        let mut placeholder = Placeholder {
+            editor,
+            color,
+            uses_viewport_units,
+        };
+        style_placeholder(
+            &mut placeholder,
+            style,
+            color,
+            value_line_height,
+            value_brush,
+            (alignment, base_direction),
+            is_multiline,
+        );
+        placeholder
+    });
+
+    text_input_data.refresh_layouts(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx);
+}
+
+/// Gives a placeholder its `::placeholder` text style and colour. Line
+/// height, brush, alignment and direction stay the value's, so showing the
+/// hint never moves the caret or changes the input's height.
+fn style_placeholder(
+    placeholder: &mut Placeholder,
+    style: parley::TextStyle<'static, 'static, TextBrush>,
+    color: style::color::AbsoluteColor,
+    value_line_height: parley::LineHeight,
+    value_brush: TextBrush,
+    (alignment, base_direction): (parley::layout::Alignment, parley::BaseDirection),
+    is_multiline: bool,
+) {
+    let editor = &mut placeholder.editor;
+    let styles = editor.edit_styles();
+    styles.retain(|_| false);
+    styles.insert(StyleProperty::FontFamily(style.font_family));
+    styles.insert(StyleProperty::FontSize(style.font_size));
+    styles.insert(StyleProperty::FontWidth(style.font_width));
+    styles.insert(StyleProperty::FontStyle(style.font_style));
+    styles.insert(StyleProperty::FontWeight(style.font_weight));
+    styles.insert(StyleProperty::FontVariations(style.font_variations));
+    styles.insert(StyleProperty::FontFeatures(style.font_features));
+    styles.insert(StyleProperty::LineHeight(value_line_height));
+    styles.insert(StyleProperty::WordSpacing(style.word_spacing));
+    styles.insert(StyleProperty::LetterSpacing(style.letter_spacing));
+    styles.insert(StyleProperty::WordBreak(style.word_break));
+    styles.insert(StyleProperty::OverflowWrap(style.overflow_wrap));
+    // A single-line hint stays on one line and the input clips it.
+    styles.insert(StyleProperty::TextWrapMode(if is_multiline {
+        style.text_wrap_mode
+    } else {
+        parley::TextWrapMode::NoWrap
+    }));
+    styles.insert(StyleProperty::WhiteSpaceCollapse(
+        style.white_space_collapse,
+    ));
+    styles.insert(StyleProperty::Brush(value_brush));
+    editor.set_alignment(alignment);
+    editor.set_base_direction(base_direction);
+    placeholder.color = color;
+}
+
+/// Restyles a text input's placeholder in place after a style traversal
+/// restyled the input. A restyle that changes only `::placeholder`, such
+/// as `input:focus::placeholder` or a new theme, needn't reconstruct the
+/// input's box, and box construction is otherwise the only place the hint
+/// takes its style. The editor keeps its text, width and scale.
+pub(crate) fn refresh_placeholder_style(doc: &mut BaseDocument, input_element_id: NodeId) {
+    let Some(is_multiline) = doc.nodes[input_element_id]
+        .element_data()
+        .and_then(|el| el.text_input_data())
+        .filter(|d| d.placeholder.is_some())
+        .map(|d| d.is_multiline)
+    else {
+        return;
+    };
+    let Some((_, style, color, uses_viewport_units)) =
+        placeholder_parts(doc, input_element_id, is_multiline)
+    else {
+        return;
+    };
+    let node = &mut doc.nodes[input_element_id];
+    let Some((value, alignment, base_direction)) = node.primary_styles().map(|s| {
+        (
+            stylo_to_parley::style(input_element_id, &s),
+            stylo_to_parley::text_align(s.clone_text_align()),
+            stylo_to_parley::base_direction(s.clone_direction(), s.clone_unicode_bidi()),
+        )
+    }) else {
+        return;
+    };
+    let Some(data) = node
+        .data
+        .downcast_element_mut()
+        .and_then(|el| el.text_input_data_mut())
+    else {
+        return;
+    };
+    let Some(placeholder) = &mut data.placeholder else {
+        return;
+    };
+    style_placeholder(
+        placeholder,
+        style,
+        color,
+        value.line_height,
+        value.brush,
+        (alignment, base_direction),
+        is_multiline,
+    );
+    placeholder.uses_viewport_units = uses_viewport_units;
+    placeholder
+        .editor
+        .refresh_layout(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx);
+}
+
+/// The text of an input's `placeholder` attribute, with the text style
+/// and colour of its `::placeholder` pseudo-element. A single-line input
+/// drops line breaks from the text, as HTML says. None when there is no
+/// text left to show.
+///
+/// `::placeholder` cascades lazily from the input, as stylo's servo
+/// pseudo-elements of its kind do. Only the text properties are used, and
+/// `opacity` on it is ignored.
+fn placeholder_parts(
+    doc: &BaseDocument,
+    input_element_id: NodeId,
+    is_multiline: bool,
+) -> Option<(
+    String,
+    parley::TextStyle<'static, 'static, TextBrush>,
+    style::color::AbsoluteColor,
+    bool,
+)> {
+    use style::computed_value_flags::ComputedValueFlags;
+    use style::selector_parser::PseudoElement;
+
+    let node = &doc.nodes[input_element_id];
+    let raw = node.attr(local_name!("placeholder"))?;
+    let text: String = if is_multiline {
+        raw.to_owned()
+    } else {
+        raw.chars().filter(|c| !matches!(c, '\n' | '\r')).collect()
+    };
+    if text.is_empty() {
+        return None;
+    }
+    let primary = node.primary_styles()?;
+    let read_guard = doc.guard.read();
+    let guards = StylesheetGuards::same(&read_guard);
+    let pseudo = doc.stylist.lazily_compute_pseudo_element_style(
+        &guards,
+        node,
+        &PseudoElement::Placeholder,
+        RuleInclusion::All,
+        &primary,
+        false,
+        None,
+    );
+    // With no rule for it at all, the UA sheet included, the hint takes
+    // the value's style at Firefox's default `::placeholder` opacity so it
+    // still doesn't read as a value.
+    // The fallback is the input's own style, which the input's restyles
+    // already track, viewport units included.
+    let (style, color, uses_viewport_units) = match &pseudo {
+        Some(p) => (
+            stylo_to_parley::style(input_element_id, p),
+            p.get_inherited_text().color,
+            p.flags.contains(ComputedValueFlags::USES_VIEWPORT_UNITS),
+        ),
+        None => {
+            let c = primary.get_inherited_text().color;
+            (
+                stylo_to_parley::style(input_element_id, &primary),
+                c.with_alpha(c.alpha * 0.54),
+                false,
+            )
+        }
+    };
+    Some((text, style, color, uses_viewport_units))
 }
 
 fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: NodeId) {

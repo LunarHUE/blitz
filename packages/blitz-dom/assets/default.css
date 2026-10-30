@@ -80,6 +80,12 @@ textarea {
     background-color: white;
 }
 
+/* Chromium's default. Only the text properties of ::placeholder apply. */
+input::placeholder,
+textarea::placeholder {
+    color: darkgray;
+}
+
 input,
 select,
 button {

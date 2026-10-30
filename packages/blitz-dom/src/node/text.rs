@@ -83,6 +83,21 @@ pub struct TextInputData {
     /// per grapheme cluster of it, so painting, selection and the caret
     /// never see the text itself.
     pub(crate) secret: Option<String>,
+    /// The `placeholder` attribute, when it has text.
+    pub(crate) placeholder: Option<Placeholder>,
+}
+
+/// A text input's placeholder: its text laid out in the `::placeholder`
+/// style, and that style's colour. It shares the editor's scale, width and
+/// refreshes, so it is shaped when the editor is, never per paint.
+pub(crate) struct Placeholder {
+    pub(crate) editor: Box<parley::PlainEditor<TextBrush>>,
+    /// Painted for every glyph. The runs' brush is the input's node, whose
+    /// own colour is the value's.
+    pub(crate) color: style::color::AbsoluteColor,
+    /// Whether that style used viewport units, so a viewport resize must
+    /// restyle the hint even when the input's own style doesn't change.
+    pub(crate) uses_viewport_units: bool,
 }
 
 /// The character a password input shows for each grapheme of its text.
@@ -170,6 +185,53 @@ impl TextInputData {
             is_multiline,
             scroll_offset: 0.0,
             secret: None,
+            placeholder: None,
+        }
+    }
+
+    /// The placeholder's layout while it shows: the input has one and
+    /// holds no text. Text being composed counts as text, so the hint
+    /// never draws under an IME preedit.
+    pub fn shown_placeholder(
+        &self,
+    ) -> Option<(&parley::Layout<TextBrush>, style::color::AbsoluteColor)> {
+        if !self.editor.raw_text().is_empty() {
+            return None;
+        }
+        let p = self.placeholder.as_ref()?;
+        Some((p.editor.try_layout()?, p.color))
+    }
+
+    /// The placeholder text, shown or not.
+    pub fn placeholder_text(&self) -> Option<&str> {
+        self.placeholder.as_ref().map(|p| p.editor.raw_text())
+    }
+
+    /// Sets the device scale on the editor and the placeholder.
+    pub(crate) fn set_scale(&mut self, scale: f32) {
+        self.editor.set_scale(scale);
+        if let Some(p) = &mut self.placeholder {
+            p.editor.set_scale(scale);
+        }
+    }
+
+    /// Sets the wrap width on the editor and the placeholder.
+    pub(crate) fn set_width(&mut self, width: Option<f32>) {
+        self.editor.set_width(width);
+        if let Some(p) = &mut self.placeholder {
+            p.editor.set_width(width);
+        }
+    }
+
+    /// Refreshes the editor's layout and the placeholder's.
+    pub(crate) fn refresh_layouts(
+        &mut self,
+        font_ctx: &mut parley::FontContext,
+        layout_ctx: &mut parley::LayoutContext<TextBrush>,
+    ) {
+        self.editor.refresh_layout(font_ctx, layout_ctx);
+        if let Some(p) = &mut self.placeholder {
+            p.editor.refresh_layout(font_ctx, layout_ctx);
         }
     }
 

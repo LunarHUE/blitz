@@ -637,6 +637,32 @@ pub(crate) fn stroke_text<'a>(
     inline_root_id: NodeId,
     context: &mut DrawTextContext,
 ) {
+    stroke_text_in(
+        scene,
+        lines,
+        doc,
+        transform,
+        scale,
+        inline_root_id,
+        context,
+        None,
+    );
+}
+
+/// As [`stroke_text`], with every glyph in `color` when it is given. A
+/// placeholder needs this: its runs carry the input's node, whose own
+/// colour is the value's, not the `::placeholder` one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stroke_text_in<'a>(
+    scene: &mut impl PaintScene,
+    lines: impl Iterator<Item = Line<'a, TextBrush>>,
+    doc: &BaseDocument,
+    transform: Affine,
+    scale: f64,
+    inline_root_id: NodeId,
+    context: &mut DrawTextContext,
+    color: Option<Color>,
+) {
     let DrawTextContext {
         stack,
         path_scratch,
@@ -708,7 +734,9 @@ pub(crate) fn stroke_text<'a>(
 
                 // The glyph colour comes from the run's own node (the stack top): `color`
                 // inherits, so the innermost inline element already carries the right value.
-                let text_color = stack.last().map(|e| e.text_color).unwrap_or(Color::BLACK);
+                let text_color = color
+                    .or_else(|| stack.last().map(|e| e.text_color))
+                    .unwrap_or(Color::BLACK);
 
                 let bold = synthetic_bold(doc, style.brush.id, run);
                 let synthetic_bold = bold.is_some();
