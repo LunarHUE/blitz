@@ -488,6 +488,9 @@ impl selectors::Element for BlitzNode<'_> {
             NonTSPseudoClass::Lang(_) => false,
             NonTSPseudoClass::CustomState(_) => false,
             NonTSPseudoClass::Link => self.element_state().contains(ElementState::UNVISITED),
+            // A placeholder paints (see `TextInputData::shown_placeholder`),
+            // but the selector stays unmatched: matching it would need a
+            // restyle each time an input empties or fills.
             NonTSPseudoClass::PlaceholderShown => false,
             NonTSPseudoClass::ReadWrite => false,
             NonTSPseudoClass::ReadOnly => false,
