@@ -2241,6 +2241,10 @@ impl BaseDocument {
             return;
         }
         self.pending_device_changes |= changes;
+        // A new viewport or device lays out differently: what was laid out
+        // is stale, so a resolve on demand (hit testing, a script reading a
+        // rect) lays out again before answering, not after the next frame.
+        self.layout_stale = true;
         self.shell_provider.request_redraw();
     }
 
