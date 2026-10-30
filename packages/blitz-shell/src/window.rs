@@ -1,12 +1,13 @@
 use crate::BlitzShellProvider;
 use crate::convert_events::{
-    button_source_to_blitz, button_source_to_blitz_button, color_scheme_to_theme, pointer_kind_to_blitz, pointer_source_to_blitz,
-    pointer_source_to_blitz_details, theme_to_color_scheme, winit_ime_to_blitz,
-    winit_key_event_to_blitz, winit_modifiers_to_kbt_modifiers,
+    button_source_to_blitz, button_source_to_blitz_button, color_scheme_to_theme,
+    pointer_kind_to_blitz, pointer_source_to_blitz, pointer_source_to_blitz_details,
+    theme_to_color_scheme, winit_ime_to_blitz, winit_key_event_to_blitz,
+    winit_modifiers_to_kbt_modifiers,
 };
 use crate::event::{BlitzShellEvent, BlitzShellProxy, create_waker};
 use anyrender::WindowRenderer;
-use blitz_dom::Document;
+use blitz_dom::{DocGuardMut, Document};
 use blitz_paint::paint_scene;
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, MouseEventButton,
@@ -325,12 +326,16 @@ impl<Rend: WindowRenderer> View<Rend> {
 
         let window_id = self.window_id();
 
+        // Install the poll waker and poll before the first paint, so the
+        // first frame shows the document after its pending work, not before.
+        self.waker = Some(create_waker(&self.proxy, window_id));
+
         // Resync the renderer to the current viewport. Resize/scale events that
         // arrived while the renderer was Pending were no-ops on the renderer
         // (its `set_size` only matches Active), so the surface created during
         // resume could be at a stale size by the time we get here.
         let animation_time = self.current_animation_time();
-        let mut inner = self.doc.inner_mut();
+        let (changed, mut inner) = begin_frame(&mut *self.doc, self.waker.as_ref());
         inner.resolve(animation_time);
         let (width, height) = inner.viewport().window_size;
         let scale = inner.viewport().scale_f64();
@@ -356,8 +361,11 @@ impl<Rend: WindowRenderer> View<Rend> {
                 insets.top,
             )
         });
+        drop(inner);
+        if changed {
+            self.update_accessibility();
+        }
 
-        self.waker = Some(create_waker(&self.proxy, window_id));
         true
     }
 
@@ -370,23 +378,33 @@ impl<Rend: WindowRenderer> View<Rend> {
     }
 
     pub fn poll(&mut self) -> bool {
-        if let Some(waker) = &self.waker {
-            let cx = std::task::Context::from_waker(waker);
-            if self.doc.poll(Some(cx)) {
-                #[cfg(feature = "accessibility")]
-                {
-                    let inner = self.doc.inner();
-                    if inner.has_changes() {
-                        self.accessibility.update_tree(&inner);
-                    }
-                }
+        if self.poll_document() {
+            self.request_redraw();
+            return true;
+        }
+        false
+    }
 
-                self.request_redraw();
-                return true;
+    /// Polls the document with the window's waker, so work it leaves
+    /// pending wakes the window later. Returns whether anything changed.
+    /// Doesn't request a redraw: [`redraw`](Self::redraw) calls it just
+    /// before painting.
+    fn poll_document(&mut self) -> bool {
+        if !poll_with_waker(&mut *self.doc, self.waker.as_ref()) {
+            return false;
+        }
+        self.update_accessibility();
+        true
+    }
+
+    fn update_accessibility(&mut self) {
+        #[cfg(feature = "accessibility")]
+        {
+            let inner = self.doc.inner();
+            if inner.has_changes() {
+                self.accessibility.update_tree(&inner);
             }
         }
-
-        false
     }
 
     pub fn request_redraw(&self) {
@@ -403,7 +421,10 @@ impl<Rend: WindowRenderer> View<Rend> {
         let animation_time = self.current_animation_time();
         let is_visible = self.is_visible;
 
-        let mut inner = self.doc.inner_mut();
+        // Poll first: a resize, scale change or other redraw can arrive
+        // before the poll the event loop queued for it, and the frame must
+        // show the document after its pending work.
+        let (changed, mut inner) = begin_frame(&mut *self.doc, self.waker.as_ref());
         inner.resolve(animation_time);
 
         // Unregister resources (e.g. textures) from dropped custom widget nodes
@@ -433,6 +454,9 @@ impl<Rend: WindowRenderer> View<Rend> {
         }
 
         drop(inner);
+        if changed {
+            self.update_accessibility();
+        }
 
         if !is_blocked && is_visible && is_animating {
             self.request_redraw();
@@ -866,5 +890,108 @@ impl<Rend: WindowRenderer> View<Rend> {
             WindowEvent::DragLeft { .. } => {},
             _ => {}
         }
+    }
+}
+
+/// The start of every painted frame, for [`View::redraw`] and
+/// [`View::complete_resume`] alike: poll the document first, then borrow it
+/// for layout and paint. Returns whether the poll changed anything, and the
+/// borrow.
+fn begin_frame<'d>(doc: &'d mut dyn Document, waker: Option<&Waker>) -> (bool, DocGuardMut<'d>) {
+    let changed = poll_with_waker(doc, waker);
+    (changed, doc.inner_mut())
+}
+
+/// Polls `doc` with `waker`, or does nothing without one (a window that
+/// isn't resumed yet). Work the document leaves pending registers `waker`,
+/// so it wakes the window when ready.
+fn poll_with_waker(doc: &mut dyn Document, waker: Option<&Waker>) -> bool {
+    let Some(waker) = waker else {
+        return false;
+    };
+    doc.poll(Some(std::task::Context::from_waker(waker)))
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::poll_with_waker;
+    use blitz_dom::{BaseDocument, DocGuard, DocGuardMut, Document, DocumentConfig};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+
+    /// A document that records the waker it was polled with and wakes it
+    /// once, later, as a document with pending work does.
+    struct Recording {
+        inner: BaseDocument,
+        polled_with: Option<Waker>,
+        polls: usize,
+        events: Vec<&'static str>,
+    }
+
+    impl Document for Recording {
+        fn inner(&self) -> DocGuard<'_> {
+            DocGuard::Ref(&self.inner)
+        }
+        fn inner_mut(&mut self) -> DocGuardMut<'_> {
+            self.events.push("borrow for layout and paint");
+            DocGuardMut::Ref(&mut self.inner)
+        }
+        fn poll(&mut self, cx: Option<Context>) -> bool {
+            self.events.push("poll");
+            self.polls += 1;
+            self.polled_with = cx.map(|cx| cx.waker().clone());
+            true
+        }
+    }
+
+    struct Counting(AtomicUsize);
+    impl Wake for Counting {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn recording() -> Recording {
+        Recording {
+            inner: BaseDocument::new(DocumentConfig::default()),
+            polled_with: None,
+            polls: 0,
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn polls_with_the_window_waker_so_pending_work_wakes_it() {
+        let counter = Arc::new(Counting(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut doc = recording();
+        assert!(poll_with_waker(&mut doc, Some(&waker)));
+        assert_eq!(doc.polls, 1);
+        let kept = doc.polled_with.take().expect("polled with a waker");
+        assert!(kept.will_wake(&waker), "polled with some other waker");
+        // The document's pending work completes later and wakes it.
+        kept.wake();
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// `redraw` and `complete_resume` both start their frame with
+    /// `begin_frame`: the document is polled before it is borrowed for
+    /// layout and paint, so the frame shows it after its pending work.
+    #[test]
+    fn a_frame_polls_the_document_before_laying_it_out() {
+        let waker = Waker::from(Arc::new(Counting(AtomicUsize::new(0))));
+        let mut doc = recording();
+        let (changed, guard) = super::begin_frame(&mut doc, Some(&waker));
+        drop(guard);
+        assert!(changed);
+        assert_eq!(doc.events, ["poll", "borrow for layout and paint"]);
+    }
+
+    #[test]
+    fn without_a_waker_the_document_isnt_polled() {
+        let mut doc = recording();
+        assert!(!poll_with_waker(&mut doc, None));
+        assert_eq!(doc.polls, 0);
     }
 }
