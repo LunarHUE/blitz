@@ -298,3 +298,34 @@ fn mixed_directions_read_left_to_right_without_overlap() {
         assert!(pair[0].1 <= pair[1].0 + 0.01, "{pair:?}");
     }
 }
+
+#[test]
+fn an_indent_that_pushes_a_fitting_line_past_the_box_ends_it_in_an_ellipsis() {
+    let short = "Sphinx of black quartz";
+    let css = "overflow:hidden; width:200px; text-overflow:ellipsis;";
+    let px = render(css, short);
+    assert!(
+        !ends_in_an_ellipsis(&px, LEFT, LEFT + 200, false),
+        "fits unindented"
+    );
+    let indented = format!("{css} text-indent:80px;");
+    let px = render(&indented, short);
+    assert!(
+        ends_in_an_ellipsis(&px, LEFT, LEFT + 200, false),
+        "past by its indent"
+    );
+    assert!(ink_rows(&px, LEFT + 200, W as usize).is_empty());
+}
+
+#[test]
+fn a_longer_line_keeps_its_indent() {
+    let css = format!("{ELLIPSIS} text-indent:40px;");
+    let px = render(&css, LONG);
+    assert!(
+        ink_rows(&px, LEFT, LEFT + 38).is_empty(),
+        "the indent stays"
+    );
+    assert!(ends_in_an_ellipsis(&px, LEFT, LEFT + 120, false));
+    assert!(ink_rows(&px, LEFT + 120, W as usize).is_empty());
+}
+

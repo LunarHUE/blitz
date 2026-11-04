@@ -44,8 +44,8 @@ const FITS: f32 = 0.01;
 /// How one line is cut. All positions are in the layout's own units, before
 /// `shift`.
 pub(crate) struct Ellipsis {
-    /// Moves the whole line, so that the end of an `rtl` line's overflow, not
-    /// its start, is what goes past the box.
+    /// Moves the whole line, if its start edge was placed outside the box, so
+    /// that its end, not its start, is what goes past it.
     pub shift: f32,
     /// The part of the line still painted, on whole cluster edges.
     pub keep: (f32, f32),
@@ -72,8 +72,23 @@ impl Ellipsis {
         }
         let line = layout.get(0)?;
         let metrics = line.metrics();
+        let rtl = layout.is_rtl();
         let width = metrics.advance - metrics.hanging_advance;
-        if width <= available + FITS {
+        let (first, last) = (metrics.offset, metrics.offset + width);
+        // Parley starts an overflowing line at its start edge, after any
+        // indent; this only brings that edge back if it was placed outside.
+        let shift = if rtl {
+            available - last
+        } else {
+            (-first).max(0.0)
+        };
+        // Whether it overflows as positioned, indent included.
+        let fits = if rtl {
+            width <= available + FITS
+        } else {
+            last + shift <= available + FITS
+        };
+        if fits {
             return None;
         }
         let mut baseline = None;
@@ -86,10 +101,6 @@ impl Ellipsis {
             }
         }
         let baseline = baseline?;
-        let rtl = layout.is_rtl();
-
-        let (first, last) = (metrics.offset, metrics.offset + width);
-        let shift = if rtl { available - last } else { -first };
         // The line's start is at the far end of the runs when `rtl`.
         let run = if rtl {
             line.runs().last()
