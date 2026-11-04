@@ -378,3 +378,44 @@ fn a_ligature_joining_two_graphemes_across_runs_is_one_piece() {
     let split = "\u{1F1EF}\u{1F1F9}\u{1F1EF}<span style=\"font-size:24px\">\u{1F1F9}</span>";
     assert_eq!(groups(split).len(), 1, "{:?}", groups(split));
 }
+#[test]
+fn an_accent_in_a_run_of_its_own_stays_with_its_base() {
+    let accented = format!("e<span style=\"font-size:24px\">\u{301}</span>{LONG}");
+    let bare = format!("e{LONG}");
+    let prefix = |px: &[u8]| columns(px, LEFT, LEFT + 14);
+    // Tall enough for the larger run's line.
+    let plain = "width:120px; height:32px; line-height:normal;";
+    let unclipped = render(plain, &accented);
+    assert_ne!(
+        prefix(&unclipped),
+        prefix(&render(plain, &bare)),
+        "the accent draws"
+    );
+    let cut = render(
+        &format!("{ELLIPSIS} height:32px; line-height:normal;"),
+        &accented,
+    );
+    assert!(ends_in_an_ellipsis(&cut, LEFT, LEFT + 120, false));
+    assert_eq!(
+        prefix(&cut),
+        prefix(&unclipped),
+        "base and accent as unclipped"
+    );
+}
+
+#[test]
+fn an_accent_whose_base_is_cut_goes_with_it() {
+    // The accented letter is past where the cut leaves text, so neither shows.
+    let tail = format!("{LONG} e<span style=\"font-size:24px\">\u{301}</span> more");
+    let css = format!("{ELLIPSIS} height:32px; line-height:normal;");
+    let with = render(&css, &tail);
+    // The same larger run, holding nothing visible, so the line sits as it does.
+    let without = render(
+        &css,
+        &format!("{LONG} e<span style=\"font-size:24px\">\u{200B}</span> more"),
+    );
+    assert_eq!(
+        columns(&with, 0, W as usize),
+        columns(&without, 0, W as usize)
+    );
+}

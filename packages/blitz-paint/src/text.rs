@@ -710,7 +710,11 @@ pub(crate) fn stroke_text_in<'a>(
                     Some((lo, hi)) => (run_x0.max(lo as f64), run_x1.min(hi as f64)),
                     None => (run_x0, run_x1),
                 };
-                if keep.is_some() && run_x0 >= run_x1 {
+                // Nothing of the run is inside what the cut keeps. A run with no
+                // advance, such as an accent set apart in its own size, is still
+                // drawn when its glyphs are, and they are kept by their base.
+                let cut = keep.is_some() && run_x0 >= run_x1;
+                if cut && glyph_run.advance() > 0.0 {
                     continue;
                 }
                 let run = glyph_run.run();
@@ -800,7 +804,9 @@ pub(crate) fn stroke_text_in<'a>(
                 };
                 let run_node_id = style.brush.id;
 
-                for entry in stack.iter() {
+                // A run the cut removed decorates nothing, though its zero-advance
+                // glyphs may have been drawn above.
+                for entry in stack.iter().filter(|_| !cut) {
                     if entry.decoration.is_none() {
                         continue;
                     }
