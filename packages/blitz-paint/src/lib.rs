@@ -12,6 +12,7 @@ mod layers;
 mod render;
 mod sizing;
 mod text;
+mod text_overflow;
 
 pub use text::synthetic_bold;
 

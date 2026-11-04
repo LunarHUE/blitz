@@ -870,12 +870,30 @@ impl ElementCx<'_, '_> {
                     panic!("Tried to render node marked as inline root that does not have an inline layout: {:?}", self.node);
                 });
 
+            let ellipsis = self.node.primary_styles().and_then(|styles| {
+                let layout = self.node.final_layout();
+                let edges = layout.padding.left
+                    + layout.padding.right
+                    + layout.border.left
+                    + layout.border.right;
+                let available = (layout.size.width - edges) as f64 * self.scale;
+                let scroll = self.node.scroll_offset();
+                crate::text_overflow::Ellipsis::plan(
+                    &styles,
+                    &text_layout.layout,
+                    &text_layout.text,
+                    available as f32,
+                    scroll.x != 0.0,
+                )
+            });
+            let shift = ellipsis.as_ref().map_or(0.0, |e| e.shift) as f64;
+
             let pos = Point {
                 x: pos.x,
                 y: pos.y + text_layout.block_offset as f64,
             };
-            let transform =
-                self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
+            let transform = self.transform
+                * Affine::translate((pos.x * self.scale + shift, pos.y * self.scale));
 
             // Render inline element backgrounds (e.g. `<span style="background: ...">`)
             // behind the text and selection highlight.
@@ -900,7 +918,7 @@ impl ElementCx<'_, '_> {
 
             // Render text
             let mut draw_text_context = self.context.draw_text_context.borrow_mut();
-            crate::text::stroke_text(
+            crate::text::stroke_text_in(
                 scene,
                 text_layout.layout.lines(),
                 self.context.dom,
@@ -908,7 +926,12 @@ impl ElementCx<'_, '_> {
                 self.scale,
                 self.node.id,
                 &mut draw_text_context,
+                None,
+                ellipsis.as_ref().map(|e| e.keep),
             );
+            if let Some(ellipsis) = &ellipsis {
+                ellipsis.draw(scene, transform, self.scale);
+            }
         }
     }
 
@@ -949,6 +972,7 @@ impl ElementCx<'_, '_> {
                     self.node.id,
                     &mut draw_text_context,
                     Some(color.as_srgb_color()),
+                    None,
                 );
             }
 
