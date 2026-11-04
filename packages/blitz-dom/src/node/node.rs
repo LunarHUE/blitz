@@ -1367,6 +1367,37 @@ impl Node {
         self.hit_inner(x, y, scale, &mut None)
     }
 
+    /// Whether painting clips this node's children for `overflow` or `contain:
+    /// paint`, as blitz-paint decides. The root element's overflow belongs to
+    /// the viewport instead.
+    fn clips_children(&self) -> bool {
+        use style::computed_values::contain::T as Contain;
+        use style::values::computed::Overflow;
+        use style::values::specified::box_::{DisplayInside, DisplayOutside};
+
+        let Some(style) = self.primary_styles() else {
+            return false;
+        };
+        let is_root_element = self
+            .parent
+            .is_some_and(|parent| self.with(parent).parent.is_none());
+        if is_root_element {
+            return false;
+        }
+        let boxed = style.get_box();
+        // Paint containment skips non-atomic inlines and internal table boxes
+        // other than cells.
+        let contain_paint = boxed.clone_contain().contains(Contain::PAINT) && {
+            let display = style.clone_display();
+            let internal_table_box = display.outside() == DisplayOutside::InternalTable
+                && display.inside() != DisplayInside::TableCell;
+            !display.is_inline_flow() && !internal_table_box
+        };
+        !matches!(boxed.overflow_x, Overflow::Visible)
+            || !matches!(boxed.overflow_y, Overflow::Visible)
+            || contain_paint
+    }
+
     /// [`hit`](Self::hit), also resolving the innermost overlay scrollbar
     /// thumb under the point into `scrollbar` during the same descent (so
     /// thumb hit-testing shares the exact coordinate handling — transforms
@@ -1397,14 +1428,20 @@ impl Node {
             .primary_styles()
             .is_some_and(|style| style.clone_pointer_events() == PointerEvents::None);
 
-        let mut x = x - self.final_layout().location.x + self.scroll_offset().x as f32;
-        let mut y = y - self.final_layout().location.y + self.scroll_offset().y as f32;
+        let untransform = |x: f32, y: f32| match self.transform().as_deref() {
+            Some(t) => {
+                let p = t.inverse() * kurbo::Point::new(x as f64 * scale, y as f64 * scale);
+                ((p.x / scale) as f32, (p.y / scale) as f32)
+            }
+            None => (x, y),
+        };
 
-        if let Some(t) = self.transform().as_deref() {
-            let p = t.inverse() * kurbo::Point::new(x as f64 * scale, y as f64 * scale);
-            x = (p.x / scale) as f32;
-            y = (p.y / scale) as f32;
-        }
+        let local_x = x - self.final_layout().location.x;
+        let local_y = y - self.final_layout().location.y;
+        let (mut x, mut y) = untransform(
+            local_x + self.scroll_offset().x as f32,
+            local_y + self.scroll_offset().y as f32,
+        );
 
         let size = self.final_layout().size;
         let matches_self = !(x < 0.0
@@ -1452,6 +1489,20 @@ impl Node {
             *scrollbar = Some(sb);
         }
 
+        // Painting clips this node's children, in flow and hoisted into it, to
+        // its padding box, so a point outside that can't hit them. A descendant
+        // hoisted to a stacking context above this node paints outside the clip
+        // and isn't reached through here. The clip is in this node's own
+        // coordinates, which its transform moves and its scrolling doesn't.
+        let (px, py) = untransform(local_x, local_y);
+        let outside_clip = self.clips_children() && {
+            let layout = self.final_layout();
+            px < layout.border.left
+                || px > layout.size.width - layout.border.right
+                || py < layout.border.top
+                || py > layout.size.height - layout.border.bottom
+        };
+
         let content_box_offset = taffy::Point {
             x: self.final_layout().padding.left + self.final_layout().border.left,
             y: self.final_layout().padding.top + self.final_layout().border.top,
@@ -1459,6 +1510,18 @@ impl Node {
         if self.flags.is_inline_root() {
             x -= content_box_offset.x;
             y -= content_box_offset.y;
+        }
+
+        if outside_clip {
+            // Only its own border can be here. `matches_self` counts the
+            // scroll offset as part of the box, so it can't tell.
+            let on_border = px >= 0.0 && px <= size.width && py >= 0.0 && py <= size.height;
+            return (on_border && !pointer_events_none).then_some(HitResult {
+                node_id: self.id,
+                x,
+                y,
+                is_text: false,
+            });
         }
 
         // Positive z_index hoisted children
