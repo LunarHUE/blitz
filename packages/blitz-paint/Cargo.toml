@@ -46,5 +46,6 @@ usvg = { workspace = true, optional = true }
 
 # Other dependencies
 bytemuck = { workspace = true }
+unicode-segmentation = "1.13"
 smallvec = { workspace = true }
 tracing = { workspace = true, optional = true }

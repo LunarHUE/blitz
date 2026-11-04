@@ -646,12 +646,26 @@ pub(crate) fn stroke_text<'a>(
         inline_root_id,
         context,
         None,
+        None,
     );
+}
+
+/// Whether glyphs of `font_size` are hinted, and how much they're emboldened,
+/// when they have no synthetic bold or slant of their own.
+pub(crate) fn glyph_style(font_size: f32, scale: f64) -> (bool, kurbo::Vec2) {
+    let embolden = if FONT_EMBOLDEN_ENABLED {
+        let fs = font_size as f64 / scale;
+        kurbo::Vec2::new((0.015125 * fs).min(0.3), (0.0121 * fs).min(0.3))
+    } else {
+        kurbo::Vec2::default()
+    };
+    (!FONT_EMBOLDEN_ENABLED, embolden)
 }
 
 /// As [`stroke_text`], with every glyph in `color` when it is given. A
 /// placeholder needs this: its runs carry the input's node, whose own
-/// colour is the value's, not the `::placeholder` one.
+/// colour is the value's, not the `::placeholder` one. With `keep`, only glyphs
+/// between those two positions are drawn, for `text-overflow`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stroke_text_in<'a>(
     scene: &mut impl PaintScene,
@@ -662,6 +676,7 @@ pub(crate) fn stroke_text_in<'a>(
     inline_root_id: NodeId,
     context: &mut DrawTextContext,
     color: Option<Color>,
+    keep: Option<(f32, f32)>,
 ) {
     let DrawTextContext {
         stack,
@@ -689,6 +704,19 @@ pub(crate) fn stroke_text_in<'a>(
 
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
+                let run_x0 = glyph_run.offset() as f64;
+                let run_x1 = run_x0 + glyph_run.advance() as f64;
+                let (run_x0, run_x1) = match keep {
+                    Some((lo, hi)) => (run_x0.max(lo as f64), run_x1.min(hi as f64)),
+                    None => (run_x0, run_x1),
+                };
+                // Nothing of the run is inside what the cut keeps. A run with no
+                // advance, such as an accent set apart in its own size, is still
+                // drawn when its glyphs are, and they are kept by their base.
+                let cut = keep.is_some() && run_x0 >= run_x1;
+                if cut && glyph_run.advance() > 0.0 {
+                    continue;
+                }
                 let run = glyph_run.run();
                 let font = run.font();
                 let font_size = run.font_size();
@@ -740,14 +768,7 @@ pub(crate) fn stroke_text_in<'a>(
 
                 let bold = synthetic_bold(doc, style.brush.id, run);
                 let synthetic_bold = bold.is_some();
-                let embolden = if let Some(amount) = bold {
-                    amount
-                } else if FONT_EMBOLDEN_ENABLED {
-                    let fs = font_size as f64 / scale;
-                    kurbo::Vec2::new((0.015125 * fs).min(0.3), (0.0121 * fs).min(0.3))
-                } else {
-                    kurbo::Vec2::default()
-                };
+                let embolden = bold.unwrap_or_else(|| glyph_style(font_size, scale).1);
 
                 let normalized_coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
                 scene.draw_glyphs(
@@ -763,11 +784,7 @@ pub(crate) fn stroke_text_in<'a>(
                     1.0, // alpha
                     glyph_xform.map_or(transform, |skew| transform * skew),
                     None,
-                    glyph_run.positioned_glyphs().map(|glyph| anyrender::Glyph {
-                        id: glyph.id as _,
-                        x: glyph.x,
-                        y: glyph.y,
-                    }),
+                    kept_glyphs(&glyph_run, keep),
                 );
 
                 // Accumulate this run's contribution to each decorating box on its ancestor
@@ -786,10 +803,10 @@ pub(crate) fn stroke_text_in<'a>(
                     css_font_size,
                 };
                 let run_node_id = style.brush.id;
-                let run_x0 = glyph_run.offset() as f64;
-                let run_x1 = run_x0 + glyph_run.advance() as f64;
 
-                for entry in stack.iter() {
+                // A run the cut removed decorates nothing, though its zero-advance
+                // glyphs may have been drawn above.
+                for entry in stack.iter().filter(|_| !cut) {
                     if entry.decoration.is_none() {
                         continue;
                     }
@@ -832,6 +849,41 @@ pub(crate) fn stroke_text_in<'a>(
             line.metrics().baseline,
         );
     }
+}
+
+/// `run`'s glyphs, placed, without those outside `keep`. `keep` sits on cluster
+/// edges, so a glyph's cluster is found from its pen: the middle of its advance.
+/// A mark has none and sits at the edge of its base, which is the far edge in a
+/// left-to-right run and the near edge in a right-to-left one.
+fn kept_glyphs<'a>(
+    run: &'a parley::GlyphRun<'a, TextBrush>,
+    keep: Option<(f32, f32)>,
+) -> impl Iterator<Item = anyrender::Glyph> + Clone + 'a {
+    const INSIDE: f32 = 0.01;
+    let rtl = run.run().is_rtl();
+    let baseline = run.baseline();
+    let mut pen = run.offset();
+    run.glyphs().filter_map(move |glyph| {
+        let at = pen;
+        pen += glyph.advance;
+        if let Some((lo, hi)) = keep {
+            let probe = if glyph.advance > 0.0 {
+                at + glyph.advance / 2.0
+            } else if rtl {
+                at + INSIDE
+            } else {
+                at - INSIDE
+            };
+            if probe < lo || probe > hi {
+                return None;
+            }
+        }
+        Some(anyrender::Glyph {
+            id: glyph.id as _,
+            x: at + glyph.x,
+            y: baseline + glyph.y,
+        })
+    })
 }
 
 /// Draw selection highlight rectangles for the given byte range in a layout.
