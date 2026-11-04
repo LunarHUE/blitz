@@ -63,8 +63,9 @@ fn ink_rows(px: &[u8], from: usize, to: usize) -> Vec<usize> {
 /// ink up its height. The cut drops whole clusters, so the marks may stop short
 /// of the edge; they are read from the ink, not from a fixed place.
 fn ends_in_an_ellipsis(px: &[u8], left: usize, right: usize, rtl: bool) -> bool {
-    // Thin dots are mostly antialiasing: anything darker than the page counts.
-    let touched = |x: usize, y: usize| px[(y * W as usize + x) * 4] < 220;
+    // Dark enough for a thin dot, not so faint that a glyph's antialiased edge
+    // joins the mark beside it.
+    let touched = |x: usize, y: usize| px[(y * W as usize + x) * 4] < 200;
     let mut marks: Vec<(usize, usize)> = Vec::new();
     let mut open = None;
     for x in left..=right {
