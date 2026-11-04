@@ -186,12 +186,22 @@ fn marks(font: &FontData, size: f32, coords: &[i16]) -> Option<(Vec<(u32, f32)>,
 }
 
 /// The line's indivisible pieces as `(left, right)`, left to right: grapheme
-/// clusters, and ligatures, which share one glyph. A grapheme split across runs,
-/// as by a change of font size inside it, is still one piece.
+/// clusters, joined where a ligature's glyph spans more than one. A grapheme
+/// split across runs, as by a change of font size inside it, is still one piece,
+/// and so is everything a ligature reaches through it.
 fn groups(line: &Line<'_, TextBrush>, text: &str) -> Vec<(f32, f32)> {
     let starts: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).collect();
     let grapheme = |at: usize| starts.partition_point(|&s| s <= at).saturating_sub(1);
-    let mut pieces: std::collections::BTreeMap<usize, (f32, f32)> = Default::default();
+    // Graphemes joined by a ligature, as a union-find over their indices.
+    let mut parent: Vec<usize> = (0..starts.len().max(1)).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut extents: Vec<(usize, f32, f32)> = Vec::new();
     let mut x = line.metrics().offset;
     // Runs come in visual order, and within a run clusters are walked
     // visually for their positions, then logically to join them.
@@ -207,17 +217,25 @@ fn groups(line: &Line<'_, TextBrush>, text: &str) -> Vec<(f32, f32)> {
         }
         let mut previous = None;
         for (cluster, left, right) in placed {
-            // A ligature's later clusters go with its first, whatever their
-            // graphemes; anything else with its own grapheme.
-            let key = match previous {
-                Some(key) if cluster.is_ligature_continuation() => key,
-                _ => grapheme(cluster.text_range().start),
-            };
-            previous = Some(key);
-            let piece = pieces.entry(key).or_insert((left, right));
-            piece.0 = piece.0.min(left);
-            piece.1 = piece.1.max(right);
+            let own = grapheme(cluster.text_range().start);
+            // A ligature's later clusters share its first one's glyph.
+            if let Some(before) = previous
+                && cluster.is_ligature_continuation()
+            {
+                let (a, b) = (root(&mut parent, before), root(&mut parent, own));
+                parent[b] = a;
+            }
+            previous = Some(own);
+            extents.push((own, left, right));
         }
+    }
+    let mut pieces: std::collections::BTreeMap<usize, (f32, f32)> = Default::default();
+    for (own, left, right) in extents {
+        let piece = pieces
+            .entry(root(&mut parent, own))
+            .or_insert((left, right));
+        piece.0 = piece.0.min(left);
+        piece.1 = piece.1.max(right);
     }
     let mut groups: Vec<(f32, f32)> = pieces.into_values().collect();
     groups.sort_by(|a, b| a.0.total_cmp(&b.0));

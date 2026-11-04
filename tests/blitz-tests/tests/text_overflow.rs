@@ -370,3 +370,11 @@ fn a_grapheme_split_across_font_sizes_is_one_piece() {
     let after = format!("{split}ab");
     assert_eq!(groups(&after).len(), 3, "{:?}", groups(&after));
 }
+
+#[test]
+fn a_ligature_joining_two_graphemes_across_runs_is_one_piece() {
+    // Shaping joins the first three indicators into one glyph; the fourth, the
+    // rest of the second flag, is set larger in a run of its own.
+    let split = "\u{1F1EF}\u{1F1F9}\u{1F1EF}<span style=\"font-size:24px\">\u{1F1F9}</span>";
+    assert_eq!(groups(split).len(), 1, "{:?}", groups(split));
+}
