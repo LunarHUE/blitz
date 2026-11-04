@@ -1419,14 +1419,20 @@ impl Node {
             .primary_styles()
             .is_some_and(|style| style.clone_pointer_events() == PointerEvents::None);
 
-        let mut x = x - self.final_layout().location.x + self.scroll_offset().x as f32;
-        let mut y = y - self.final_layout().location.y + self.scroll_offset().y as f32;
+        let untransform = |x: f32, y: f32| match self.transform().as_deref() {
+            Some(t) => {
+                let p = t.inverse() * kurbo::Point::new(x as f64 * scale, y as f64 * scale);
+                ((p.x / scale) as f32, (p.y / scale) as f32)
+            }
+            None => (x, y),
+        };
 
-        if let Some(t) = self.transform().as_deref() {
-            let p = t.inverse() * kurbo::Point::new(x as f64 * scale, y as f64 * scale);
-            x = (p.x / scale) as f32;
-            y = (p.y / scale) as f32;
-        }
+        let local_x = x - self.final_layout().location.x;
+        let local_y = y - self.final_layout().location.y;
+        let (mut x, mut y) = untransform(
+            local_x + self.scroll_offset().x as f32,
+            local_y + self.scroll_offset().y as f32,
+        );
 
         let size = self.final_layout().size;
         let matches_self = !(x < 0.0
@@ -1477,13 +1483,11 @@ impl Node {
         // Painting clips this node's children, in flow and hoisted into it, to
         // its padding box, so a point outside that can't hit them. A descendant
         // hoisted to a stacking context above this node paints outside the clip
-        // and isn't reached through here.
+        // and isn't reached through here. The clip is in this node's own
+        // coordinates, which its transform moves and its scrolling doesn't.
         let outside_clip = self.clips_children() && {
             let layout = self.final_layout();
-            let (px, py) = (
-                x - self.scroll_offset().x as f32,
-                y - self.scroll_offset().y as f32,
-            );
+            let (px, py) = untransform(local_x, local_y);
             px < layout.border.left
                 || px > layout.size.width - layout.border.right
                 || py < layout.border.top
