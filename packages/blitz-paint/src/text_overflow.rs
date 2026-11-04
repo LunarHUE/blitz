@@ -204,6 +204,12 @@ fn groups(line: &Line<'_, TextBrush>, text: &str) -> Vec<(f32, f32)> {
     groups
 }
 
+/// The first line's [`groups`], for tests, which shape with real fonts.
+#[doc(hidden)]
+pub fn line_groups(layout: &Layout<TextBrush>, text: &str) -> Vec<(f32, f32)> {
+    layout.get(0).map_or_else(Vec::new, |line| groups(&line, text))
+}
+
 /// What stays of `groups` from the left, with nothing past `limit`.
 fn keep_start(groups: &[(f32, f32)], limit: f32) -> Option<(f32, f32)> {
     let kept = groups.iter().take_while(|g| g.1 <= limit + FITS);

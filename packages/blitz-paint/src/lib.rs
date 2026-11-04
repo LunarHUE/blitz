@@ -13,6 +13,8 @@ mod render;
 mod sizing;
 mod text;
 mod text_overflow;
+#[doc(hidden)]
+pub use text_overflow::line_groups;
 
 pub use text::synthetic_bold;
 

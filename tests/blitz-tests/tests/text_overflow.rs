@@ -58,40 +58,65 @@ fn ink_rows(px: &[u8], from: usize, to: usize) -> Vec<usize> {
         .collect()
 }
 
-/// An ellipsis in those columns: separate marks low on the line, where text
-/// that merely stopped would have ink up its height.
-fn looks_like_an_ellipsis(px: &[u8], from: usize, to: usize) -> bool {
-    let rows = ink_rows(px, from, to);
-    let tall = rows.last().zip(rows.first()).map_or(99, |(l, f)| l - f);
+/// Whether the line between those columns ends in an ellipsis: three separate
+/// marks at its cut end, low on the line, where text that merely stopped has
+/// ink up its height. The cut drops whole clusters, so the marks may stop short
+/// of the edge; they are read from the ink, not from a fixed place.
+fn ends_in_an_ellipsis(px: &[u8], left: usize, right: usize, rtl: bool) -> bool {
     // Thin dots are mostly antialiasing: anything darker than the page counts.
-    let touched = |x, y| px[(y * W as usize + x) * 4] < 220;
-    let columns: Vec<bool> = (from..to)
-        .map(|x| (0..H as usize).any(|y| touched(x, y)))
-        .collect();
-    let marks = columns.windows(2).filter(|w| !w[0] && w[1]).count() + usize::from(columns[0]);
-    !rows.is_empty() && tall <= 3 && marks == 3
+    let touched = |x: usize, y: usize| px[(y * W as usize + x) * 4] < 220;
+    let mut marks: Vec<(usize, usize)> = Vec::new();
+    let mut open = None;
+    for x in left..=right {
+        let ink = x < right && (0..H as usize).any(|y| touched(x, y));
+        match (ink, open) {
+            (true, None) => open = Some(x),
+            (false, Some(from)) => {
+                marks.push((from, x));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    if marks.len() < 4 {
+        return false;
+    }
+    if rtl {
+        marks.reverse();
+    }
+    let low = |&(from, to): &(usize, usize)| {
+        let rows: Vec<usize> = (0..H as usize)
+            .filter(|y| (from..to).any(|x| touched(x, *y)))
+            .collect();
+        rows.last().unwrap() - rows.first().unwrap() <= 3
+    };
+    let tail = &marks[marks.len() - 3..];
+    tail.iter().all(low) && !low(&marks[marks.len() - 4])
 }
 
 const CLIPPED: &str = "overflow:hidden; width:120px;";
 const ELLIPSIS: &str = "overflow:hidden; width:120px; text-overflow:ellipsis;";
-/// Room for the marks of a 16px ellipsis at the box's edge.
-const MARKS: usize = 16;
 
 #[test]
 fn an_overflowing_line_ends_in_an_ellipsis_inside_the_box() {
     let px = render(ELLIPSIS, LONG);
     let right = LEFT + 120;
-    assert!(
-        looks_like_an_ellipsis(&px, right - MARKS, right),
-        "rows {:?}",
-        ink_rows(&px, right - MARKS, right)
-    );
+    assert!(ends_in_an_ellipsis(&px, LEFT, right, false));
     assert!(
         ink_rows(&px, right, W as usize).is_empty(),
         "nothing past the box"
     );
-    assert!(!ink_rows(&px, LEFT, LEFT + 40).is_empty(), "the start stays");
+    assert!(
+        !ink_rows(&px, LEFT, LEFT + 40).is_empty(),
+        "the start stays"
+    );
     assert_ne!(px, render(CLIPPED, LONG), "it isn't the plain clip");
+}
+
+#[test]
+fn the_plain_clip_has_no_ellipsis() {
+    let px = render(CLIPPED, LONG);
+    assert!(!ends_in_an_ellipsis(&px, LEFT, LEFT + 120, false));
 }
 
 #[test]
@@ -125,7 +150,8 @@ fn the_two_value_form_keeps_the_plain_clip() {
 
 #[test]
 fn an_inline_box_on_the_line_keeps_the_plain_clip() {
-    let inner = format!(r#"<span style="display:inline-block; width:4px; height:4px;"></span>{LONG}"#);
+    let inner =
+        format!(r#"<span style="display:inline-block; width:4px; height:4px;"></span>{LONG}"#);
     assert_eq!(render(ELLIPSIS, &inner), render(CLIPPED, &inner));
 }
 
@@ -145,11 +171,7 @@ fn only_the_paint_changes() {
 fn right_to_left_keeps_the_start_on_the_right_and_cuts_on_the_left() {
     let rtl = format!("{ELLIPSIS} direction:rtl;");
     let px = render(&rtl, LONG);
-    assert!(
-        looks_like_an_ellipsis(&px, LEFT, LEFT + MARKS),
-        "rows {:?}",
-        ink_rows(&px, LEFT, LEFT + MARKS)
-    );
+    assert!(ends_in_an_ellipsis(&px, LEFT, LEFT + 120, true));
     assert!(ink_rows(&px, 0, LEFT).is_empty(), "nothing past the box");
     assert!(
         !ink_rows(&px, LEFT + 80, LEFT + 120).is_empty(),
@@ -196,17 +218,50 @@ fn styled_runs_inside_the_line_are_cut_as_one_line() {
     let px = render(ELLIPSIS, &inner);
     let right = LEFT + 120;
     assert!(ink_rows(&px, right, W as usize).is_empty());
-    assert!(looks_like_an_ellipsis(&px, right - MARKS, right));
+    assert!(ends_in_an_ellipsis(&px, LEFT, right, false));
 }
 
 #[test]
 fn it_follows_the_box_as_the_box_changes() {
     let mut doc = doc_of("overflow:hidden; width:50%; text-overflow:ellipsis;", LONG);
     let wide = paint(&mut doc);
-    assert!(looks_like_an_ellipsis(&wide, LEFT + 160 - MARKS, LEFT + 160));
+    assert!(ends_in_an_ellipsis(&wide, LEFT, LEFT + 160, false));
     doc.set_viewport(Viewport::new(W / 2, H, 1.0, ColorScheme::Light));
     doc.resolve(0.0);
     let narrow = paint(&mut doc);
-    assert!(looks_like_an_ellipsis(&narrow, LEFT + 80 - MARKS, LEFT + 80));
+    assert!(ends_in_an_ellipsis(&narrow, LEFT, LEFT + 80, false));
     assert!(ink_rows(&narrow, LEFT + 80, W as usize).is_empty());
+}
+
+/// The pieces a line is cut between, for `text` as shaped in a box.
+fn groups(text: &str) -> Vec<(f32, f32)> {
+    let doc = doc_of(ELLIPSIS, text);
+    let id = doc.query_selector("#box").unwrap().unwrap();
+    let data = doc.get_node(id).unwrap().element_data().unwrap();
+    let inline = data.inline_layout_data.as_ref().unwrap();
+    blitz_paint::line_groups(&inline.layout, &inline.text)
+}
+
+#[test]
+fn a_grapheme_is_never_two_pieces() {
+    // Whether the system's fonts can draw these or not.
+    for (one, what) in [
+        ("a", "a letter"),
+        ("e\u{301}", "a combining mark"),
+        ("\u{1F1EF}\u{1F1F9}", "a flag"),
+        ("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "a family"),
+        ("\u{1F44D}\u{1F3FD}", "a skin tone"),
+        ("\u{1100}\u{1161}", "conjoining jamo"),
+    ] {
+        assert_eq!(groups(&one.repeat(5)).len(), 5, "{what}");
+    }
+}
+
+#[test]
+fn mixed_directions_read_left_to_right_without_overlap() {
+    let groups = groups("abc \u{645}\u{631}\u{62D}\u{628}\u{627} def");
+    assert!(groups.len() >= 11, "{groups:?}");
+    for pair in groups.windows(2) {
+        assert!(pair[0].1 <= pair[1].0 + 0.01, "{pair:?}");
+    }
 }
