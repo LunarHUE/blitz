@@ -1485,9 +1485,9 @@ impl Node {
         // hoisted to a stacking context above this node paints outside the clip
         // and isn't reached through here. The clip is in this node's own
         // coordinates, which its transform moves and its scrolling doesn't.
+        let (px, py) = untransform(local_x, local_y);
         let outside_clip = self.clips_children() && {
             let layout = self.final_layout();
-            let (px, py) = untransform(local_x, local_y);
             px < layout.border.left
                 || px > layout.size.width - layout.border.right
                 || py < layout.border.top
@@ -1504,8 +1504,10 @@ impl Node {
         }
 
         if outside_clip {
-            // Only its own border can be here.
-            return (matches_self && !pointer_events_none).then_some(HitResult {
+            // Only its own border can be here. `matches_self` counts the
+            // scroll offset as part of the box, so it can't tell.
+            let on_border = px >= 0.0 && px <= size.width && py >= 0.0 && py <= size.height;
+            return (on_border && !pointer_events_none).then_some(HitResult {
                 node_id: self.id,
                 x,
                 y,
