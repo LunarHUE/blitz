@@ -253,8 +253,17 @@ fn a_grapheme_is_never_two_pieces() {
         ("\u{1F44D}\u{1F3FD}", "a skin tone"),
         ("\u{1100}\u{1161}", "conjoining jamo"),
     ] {
-        assert_eq!(groups(&one.repeat(5)).len(), 5, "{what}");
+        // Shaping may join more, as it joins a run of flags: a piece is never
+        // smaller than a grapheme, so there are never more than there are.
+        let pieces = groups(&one.repeat(5)).len();
+        assert!((1..=5).contains(&pieces), "{what}: {pieces}");
     }
+}
+
+#[test]
+fn plain_letters_and_marks_are_a_piece_each() {
+    assert_eq!(groups(&"a".repeat(5)).len(), 5);
+    assert_eq!(groups(&"e\u{301}".repeat(5)).len(), 5);
 }
 
 #[test]

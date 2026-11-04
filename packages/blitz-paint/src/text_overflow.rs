@@ -8,7 +8,8 @@
 //! line is cut at its end edge: the right for `direction: ltr`, the left for
 //! `rtl`, where the line is also moved so that its start stays in view. Whole
 //! grapheme clusters and whole ligatures are dropped until the ellipsis fits
-//! beside what remains. A box too narrow for any text shows the ellipsis alone,
+//! beside what remains. Shaping can join more than one grapheme, as it does a
+//! run of flags, and then they go together. A box too narrow for any text shows the ellipsis alone,
 //! clipped like anything else.
 //!
 //! Anything else keeps the plain clip it had: several lines, inline boxes on
@@ -207,7 +208,9 @@ fn groups(line: &Line<'_, TextBrush>, text: &str) -> Vec<(f32, f32)> {
 /// The first line's [`groups`], for tests, which shape with real fonts.
 #[doc(hidden)]
 pub fn line_groups(layout: &Layout<TextBrush>, text: &str) -> Vec<(f32, f32)> {
-    layout.get(0).map_or_else(Vec::new, |line| groups(&line, text))
+    layout
+        .get(0)
+        .map_or_else(Vec::new, |line| groups(&line, text))
 }
 
 /// What stays of `groups` from the left, with nothing past `limit`.
