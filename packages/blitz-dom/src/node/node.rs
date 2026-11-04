@@ -1373,6 +1373,7 @@ impl Node {
     fn clips_children(&self) -> bool {
         use style::computed_values::contain::T as Contain;
         use style::values::computed::Overflow;
+        use style::values::specified::box_::{DisplayInside, DisplayOutside};
 
         let Some(style) = self.primary_styles() else {
             return false;
@@ -1384,9 +1385,17 @@ impl Node {
             return false;
         }
         let boxed = style.get_box();
+        // Paint containment skips non-atomic inlines and internal table boxes
+        // other than cells.
+        let contain_paint = boxed.clone_contain().contains(Contain::PAINT) && {
+            let display = style.clone_display();
+            let internal_table_box = display.outside() == DisplayOutside::InternalTable
+                && display.inside() != DisplayInside::TableCell;
+            !display.is_inline_flow() && !internal_table_box
+        };
         !matches!(boxed.overflow_x, Overflow::Visible)
             || !matches!(boxed.overflow_y, Overflow::Visible)
-            || boxed.clone_contain().contains(Contain::PAINT)
+            || contain_paint
     }
 
     /// [`hit`](Self::hit), also resolving the innermost overlay scrollbar
