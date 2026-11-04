@@ -597,9 +597,18 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
         }
     }
 
-    // Dispatch a click event
+    // Dispatch a click event, at the nearest element holding both where the
+    // press began and where it ended, as browsers do: a press that leaves one
+    // control and ends on another clicks neither.
     if do_click && event.button == MouseEventButton::Main {
-        dispatch_event(DomEvent::new(target, DomEventData::Click(event.clone())));
+        let click_target = doc
+            .mousedown_node_id
+            .and_then(|down| common_ancestor(doc, down, target))
+            .unwrap_or(target);
+        dispatch_event(DomEvent::new(
+            click_target,
+            DomEventData::Click(event.clone()),
+        ));
     }
 
     // Dispatch a context menu event
@@ -609,6 +618,21 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
             DomEventData::ContextMenu(event.clone()),
         ));
     }
+}
+
+/// The nearest node that is `a` or an ancestor of it and also `b` or an
+/// ancestor of it. `None` when either has left the tree.
+fn common_ancestor(doc: &BaseDocument, a: NodeId, b: NodeId) -> Option<NodeId> {
+    let chain = |mut id: NodeId| {
+        let mut out = vec![id];
+        while let Some(parent) = doc.get_node(id)?.parent {
+            out.push(parent);
+            id = parent;
+        }
+        Some(out)
+    };
+    let ups = chain(a)?;
+    chain(b)?.into_iter().find(|n| ups.contains(n))
 }
 
 pub(crate) fn handle_click(
