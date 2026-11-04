@@ -213,6 +213,29 @@ fn unicode_is_cut_on_whole_clusters() {
 }
 
 #[test]
+fn a_name_given_way_to_in_a_flex_row_is_cut_at_what_it_was_left() {
+    // As a tab or tree row lays it out: an icon, then a name with a limit.
+    let inner = format!(
+        r#"<span style="flex:none; width:24px; height:20px; background:#fff"></span>
+        <span style="display:block; min-width:0; max-width:160px; overflow:hidden;
+                     text-overflow:ellipsis;">{LONG}</span>"#
+    );
+    let px = render("display:flex; width:400px;", &inner);
+    let (left, right) = (LEFT + 24, LEFT + 24 + 160);
+    assert!(ends_in_an_ellipsis(&px, left, right, false), "at its limit");
+    assert!(ink_rows(&px, right, W as usize).is_empty());
+
+    let px = render("display:flex; width:120px;", &inner);
+    let right = LEFT + 120;
+    assert!(ends_in_an_ellipsis(&px, left, right, false), "given way");
+    assert!(ink_rows(&px, right, W as usize).is_empty());
+
+    let short = inner.replace(LONG, "Home");
+    let px = render("display:flex; width:400px;", &short);
+    assert!(!ends_in_an_ellipsis(&px, left, right, false), "fits");
+}
+
+#[test]
 fn styled_runs_inside_the_line_are_cut_as_one_line() {
     let inner = format!(r#"Sphinx <b style="color:#000">of black</b> <i>quartz</i> {LONG}"#);
     let px = render(ELLIPSIS, &inner);
