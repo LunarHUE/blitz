@@ -1367,6 +1367,28 @@ impl Node {
         self.hit_inner(x, y, scale, &mut None)
     }
 
+    /// Whether painting clips this node's children for `overflow` or `contain:
+    /// paint`, as blitz-paint decides. The root element's overflow belongs to
+    /// the viewport instead.
+    fn clips_children(&self) -> bool {
+        use style::computed_values::contain::T as Contain;
+        use style::values::computed::Overflow;
+
+        let Some(style) = self.primary_styles() else {
+            return false;
+        };
+        let is_root_element = self
+            .parent
+            .is_some_and(|parent| self.with(parent).parent.is_none());
+        if is_root_element {
+            return false;
+        }
+        let boxed = style.get_box();
+        !matches!(boxed.overflow_x, Overflow::Visible)
+            || !matches!(boxed.overflow_y, Overflow::Visible)
+            || boxed.clone_contain().contains(Contain::PAINT)
+    }
+
     /// [`hit`](Self::hit), also resolving the innermost overlay scrollbar
     /// thumb under the point into `scrollbar` during the same descent (so
     /// thumb hit-testing shares the exact coordinate handling — transforms
@@ -1452,6 +1474,22 @@ impl Node {
             *scrollbar = Some(sb);
         }
 
+        // Painting clips this node's children, in flow and hoisted into it, to
+        // its padding box, so a point outside that can't hit them. A descendant
+        // hoisted to a stacking context above this node paints outside the clip
+        // and isn't reached through here.
+        let outside_clip = self.clips_children() && {
+            let layout = self.final_layout();
+            let (px, py) = (
+                x - self.scroll_offset().x as f32,
+                y - self.scroll_offset().y as f32,
+            );
+            px < layout.border.left
+                || px > layout.size.width - layout.border.right
+                || py < layout.border.top
+                || py > layout.size.height - layout.border.bottom
+        };
+
         let content_box_offset = taffy::Point {
             x: self.final_layout().padding.left + self.final_layout().border.left,
             y: self.final_layout().padding.top + self.final_layout().border.top,
@@ -1459,6 +1497,16 @@ impl Node {
         if self.flags.is_inline_root() {
             x -= content_box_offset.x;
             y -= content_box_offset.y;
+        }
+
+        if outside_clip {
+            // Only its own border can be here.
+            return (matches_self && !pointer_events_none).then_some(HitResult {
+                node_id: self.id,
+                x,
+                y,
+                is_text: false,
+            });
         }
 
         // Positive z_index hoisted children
