@@ -186,11 +186,12 @@ fn marks(font: &FontData, size: f32, coords: &[i16]) -> Option<(Vec<(u32, f32)>,
 }
 
 /// The line's indivisible pieces as `(left, right)`, left to right: grapheme
-/// clusters, and ligatures, which share one glyph.
+/// clusters, and ligatures, which share one glyph. A grapheme split across runs,
+/// as by a change of font size inside it, is still one piece.
 fn groups(line: &Line<'_, TextBrush>, text: &str) -> Vec<(f32, f32)> {
-    let boundaries: std::collections::HashSet<usize> =
-        text.grapheme_indices(true).map(|(i, _)| i).collect();
-    let mut groups: Vec<(f32, f32)> = Vec::new();
+    let starts: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).collect();
+    let grapheme = |at: usize| starts.partition_point(|&s| s <= at).saturating_sub(1);
+    let mut pieces: std::collections::BTreeMap<usize, (f32, f32)> = Default::default();
     let mut x = line.metrics().offset;
     // Runs come in visual order, and within a run clusters are walked
     // visually for their positions, then logically to join them.
@@ -204,20 +205,21 @@ fn groups(line: &Line<'_, TextBrush>, text: &str) -> Vec<(f32, f32)> {
         if run.is_rtl() {
             placed.reverse();
         }
-        let from = groups.len();
+        let mut previous = None;
         for (cluster, left, right) in placed {
-            let joined = groups.len() > from
-                && (cluster.is_ligature_continuation()
-                    || !boundaries.contains(&cluster.text_range().start));
-            if joined {
-                let last = groups.last_mut().expect("just checked");
-                last.0 = last.0.min(left);
-                last.1 = last.1.max(right);
-            } else {
-                groups.push((left, right));
-            }
+            // A ligature's later clusters go with its first, whatever their
+            // graphemes; anything else with its own grapheme.
+            let key = match previous {
+                Some(key) if cluster.is_ligature_continuation() => key,
+                _ => grapheme(cluster.text_range().start),
+            };
+            previous = Some(key);
+            let piece = pieces.entry(key).or_insert((left, right));
+            piece.0 = piece.0.min(left);
+            piece.1 = piece.1.max(right);
         }
     }
+    let mut groups: Vec<(f32, f32)> = pieces.into_values().collect();
     groups.sort_by(|a, b| a.0.total_cmp(&b.0));
     groups
 }

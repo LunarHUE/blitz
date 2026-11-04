@@ -361,3 +361,12 @@ fn right_to_left_keeps_its_indent_at_the_right() {
     assert!(ends_in_an_ellipsis(&px, LEFT, LEFT + 92, true));
 }
 
+#[test]
+fn a_grapheme_split_across_font_sizes_is_one_piece() {
+    // A ZWJ family whose last part is set larger, so it shapes in two runs.
+    let split = "<span style=\"font-size:16px\">\u{1F468}\u{200D}\u{1F469}</span>\
+                 <span style=\"font-size:24px\">\u{200D}\u{1F467}</span>";
+    assert_eq!(groups(split).len(), 1, "{:?}", groups(split));
+    let after = format!("{split}ab");
+    assert_eq!(groups(&after).len(), 3, "{:?}", groups(&after));
+}
