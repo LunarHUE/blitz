@@ -73,18 +73,24 @@ impl Ellipsis {
         let line = layout.get(0)?;
         let metrics = line.metrics();
         let rtl = layout.is_rtl();
-        let width = metrics.advance - metrics.hanging_advance;
-        let (first, last) = (metrics.offset, metrics.offset + width);
+        let (offset, advance, hanging) = (metrics.offset, metrics.advance, metrics.hanging_advance);
+        // The ink as placed. Hanging whitespace sits after the text: at the
+        // right of an `ltr` line, at the left of an `rtl` one.
+        let (first, last) = if rtl {
+            (offset + hanging, offset + advance)
+        } else {
+            (offset, offset + advance - hanging)
+        };
         // Parley starts an overflowing line at its start edge, after any
         // indent; this only brings that edge back if it was placed outside.
         let shift = if rtl {
-            available - last
+            (available - last).min(0.0)
         } else {
             (-first).max(0.0)
         };
-        // Whether it overflows as positioned, indent included.
+        // Whether it overflows as placed, indent included.
         let fits = if rtl {
-            width <= available + FITS
+            first + shift >= -FITS
         } else {
             last + shift <= available + FITS
         };

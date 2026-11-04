@@ -329,3 +329,35 @@ fn a_longer_line_keeps_its_indent() {
     assert!(ink_rows(&px, LEFT + 120, W as usize).is_empty());
 }
 
+/// Columns `from..to` of every row.
+fn columns(px: &[u8], from: usize, to: usize) -> Vec<u8> {
+    (0..H as usize)
+        .flat_map(|y| (from..to).map(move |x| px[(y * W as usize + x) * 4]))
+        .collect()
+}
+
+#[test]
+fn right_to_left_hanging_space_leaves_the_right_edge_as_it_was() {
+    let rtl = format!("{ELLIPSIS} direction:rtl;");
+    let plain = render(&rtl, LONG);
+    let hanging = render(&rtl, &format!("{LONG}\u{3000}"));
+    assert!(!ink_rows(&plain, LEFT + 60, LEFT + 120).is_empty());
+    assert_eq!(
+        columns(&plain, LEFT + 60, W as usize),
+        columns(&hanging, LEFT + 60, W as usize),
+        "the start, at the right, doesn't move"
+    );
+    assert!(ink_rows(&hanging, LEFT + 120, W as usize).is_empty());
+}
+
+#[test]
+fn right_to_left_keeps_its_indent_at_the_right() {
+    let css = format!("{ELLIPSIS} direction:rtl; text-indent:30px;");
+    let px = render(&css, LONG);
+    assert!(
+        ink_rows(&px, LEFT + 92, W as usize).is_empty(),
+        "the indent stays"
+    );
+    assert!(ends_in_an_ellipsis(&px, LEFT, LEFT + 92, true));
+}
+
