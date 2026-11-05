@@ -556,6 +556,7 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
     doc: &mut BaseDocument,
     target: NodeId,
     event: &BlitzPointerEvent,
+    release: Option<u64>,
     mut dispatch_event: F,
 ) {
     if doc.devtools().highlight_hover {
@@ -597,9 +598,29 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
         }
     }
 
-    // Dispatch a click event
+    // The click goes to the nearest element holding both where this pointer's
+    // button went down and where it came up, as browsers do: a press that
+    // leaves one control and ends on another clicks neither. With no press on
+    // record, or its node gone from the document, nothing is clicked: the
+    // element now under the pointer wasn't pressed.
+    // Only the physical release that ended the press clicks from it, and only
+    // while its node never left the document.
+    let origin = release.and_then(|token| {
+        doc.pending_releases
+            .iter()
+            .find(|(t, _)| *t == token)
+            .map(|(_, node)| *node)
+    });
     if do_click && event.button == MouseEventButton::Main {
-        dispatch_event(DomEvent::new(target, DomEventData::Click(event.clone())));
+        let click_target = origin
+            .filter(|down| is_connected(doc, *down) && is_connected(doc, target))
+            .and_then(|down| common_ancestor(doc, down, target));
+        if let Some(click_target) = click_target {
+            dispatch_event(DomEvent::new(
+                click_target,
+                DomEventData::Click(event.clone()),
+            ));
+        }
     }
 
     // Dispatch a context menu event
@@ -609,6 +630,35 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
             DomEventData::ContextMenu(event.clone()),
         ));
     }
+}
+
+/// Whether `node` is still in the document, not removed or detached.
+fn is_connected(doc: &BaseDocument, mut node: NodeId) -> bool {
+    let root = doc.root_node().id;
+    loop {
+        if node == root {
+            return true;
+        }
+        match doc.get_node(node).and_then(|n| n.parent) {
+            Some(parent) => node = parent,
+            None => return false,
+        }
+    }
+}
+
+/// The nearest node that is `a` or an ancestor of it and also `b` or an
+/// ancestor of it. `None` when either has left the tree.
+fn common_ancestor(doc: &BaseDocument, a: NodeId, b: NodeId) -> Option<NodeId> {
+    let chain = |mut id: NodeId| {
+        let mut out = vec![id];
+        while let Some(parent) = doc.get_node(id)?.parent {
+            out.push(parent);
+            id = parent;
+        }
+        Some(out)
+    };
+    let ups = chain(a)?;
+    chain(b)?.into_iter().find(|n| ups.contains(n))
 }
 
 pub(crate) fn handle_click(

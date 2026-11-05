@@ -20,7 +20,7 @@ use crate::{
     TextNodeData,
 };
 use blitz_traits::devtools::DevtoolSettings;
-use blitz_traits::events::{DomEvent, HitResult, UiEvent};
+use blitz_traits::events::{BlitzPointerId, DomEvent, HitResult, MouseEventButton, UiEvent};
 use blitz_traits::navigation::{DummyNavigationProvider, NavigationProvider};
 use blitz_traits::net::{AbortSignal, DummyNetProvider, NetProvider, Request};
 use blitz_traits::node_id::NodeId;
@@ -322,6 +322,14 @@ pub struct BaseDocument {
     pub(crate) active_node_id: Option<NodeId>,
     /// The node which recieved a mousedown event (if any)
     pub(crate) mousedown_node_id: Option<NodeId>,
+    /// Where each pointer's held button went down, for the click its release
+    /// makes. Taken on release, and dropped on cancel or when the node goes.
+    pub(crate) click_origins: Vec<(BlitzPointerId, MouseEventButton, NodeId)>,
+    /// The presses physical releases are ending, each under a token its
+    /// release's dispatch holds and hands to its own default action. Removing
+    /// a node voids its entry, even if the node comes back.
+    pub(crate) pending_releases: Vec<(u64, NodeId)>,
+    pub(crate) next_release: u64,
     /// The last time a mousedown was made (for double-click detection)
     pub(crate) last_mousedown_time: Option<Instant>,
     /// The position where mousedown occurred (for selection drags and double-click detection)
@@ -526,6 +534,9 @@ impl BaseDocument {
             refresh_hover_on_resolve: true,
             active_node_id: None,
             mousedown_node_id: None,
+            click_origins: Vec::new(),
+            pending_releases: Vec::new(),
+            next_release: 0,
             has_active_animations: false,
             subdoc_is_animating: false,
             has_canvas: false,
@@ -671,7 +682,18 @@ impl BaseDocument {
         event: &mut DomEvent,
         dispatch_event: F,
     ) {
-        handle_dom_event(self, event, dispatch_event)
+        handle_dom_event(self, event, None, dispatch_event)
+    }
+
+    /// [`Self::handle_dom_event`] for a physical release's own pointerup,
+    /// with the token of the press it ends.
+    pub(crate) fn handle_release_dom_event<F: FnMut(DomEvent)>(
+        &mut self,
+        event: &mut DomEvent,
+        release: Option<u64>,
+        dispatch_event: F,
+    ) {
+        handle_dom_event(self, event, release, dispatch_event)
     }
 
     pub fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -978,6 +1000,8 @@ impl BaseDocument {
         if self.mousedown_node_id == Some(node_id) {
             self.mousedown_node_id = None;
         }
+        self.click_origins.retain(|(_, _, n)| *n != node_id);
+        self.pending_releases.retain(|(_, n)| *n != node_id);
         if self.text_selection.anchor.node_or_parent == Some(node_id)
             || self.text_selection.focus.node_or_parent == Some(node_id)
         {

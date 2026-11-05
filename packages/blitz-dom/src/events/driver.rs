@@ -184,6 +184,8 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
 
         // A non-hovering pointer (finger) ends hover once it is lifted or cancelled
         let mut hover_end_event = None;
+        // The press a physical release ends, taken before any handler runs.
+        let mut released = None;
         let mut hover_node_id = doc.hover_node_id;
         let focussed_node_id = doc.focus_node_id;
         let prev_hover = doc.hover_state();
@@ -202,11 +204,23 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 let mut doc = self.doc.inner_mut();
                 doc.active_node();
                 doc.set_mousedown_node_id(hover_node_id);
+                doc.click_origins
+                    .retain(|(id, button, _)| (*id, *button) != (event.id, event.button));
+                if let Some(down) = hover_node_id {
+                    doc.click_origins.push((event.id, event.button, down));
+                }
             }
             UiEvent::PointerUp(event) => {
                 hover_node_id = self.handle_pointer_move(event);
                 let mut doc = self.doc.inner_mut();
                 doc.unactive_node();
+                // The press ends here whether or not the release is cancelled.
+                let key = (event.id, event.button);
+                released = doc
+                    .click_origins
+                    .iter()
+                    .position(|(id, button, _)| (*id, *button) == key)
+                    .map(|i| doc.click_origins.remove(i).2);
 
                 if event.is_primary && matches!(event.id, BlitzPointerId::Finger(_)) {
                     hover_end_event = Some(event.clone());
@@ -216,6 +230,7 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 hover_node_id = self.handle_pointer_move(event);
                 let mut doc = self.doc.inner_mut();
                 doc.unactive_node();
+                doc.click_origins.retain(|(id, _, _)| *id != event.id);
 
                 if event.is_primary && matches!(event.id, BlitzPointerId::Finger(_)) {
                     hover_end_event = Some(event.clone());
@@ -258,13 +273,31 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 );
             }
             UiEvent::PointerUp(data) => {
-                self.handle_pointer_event(
+                // The token is this dispatch's alone: a release dispatched from
+                // one of its handlers has none and can't use or end this press.
+                let release = released.map(|node| {
+                    let mut doc = self.doc.inner_mut();
+                    doc.next_release += 1;
+                    let token = doc.next_release;
+                    doc.pending_releases.push((token, node));
+                    token
+                });
+                self.handle_pointer_event_releasing(
                     target,
                     data,
                     DomEventData::PointerUp,
                     Some(DomEventData::MouseUp),
                     DomEventData::TouchEnd,
+                    release,
                 );
+                // Clicked from or cancelled, the press is over. An unwind
+                // skips this, leaving an entry no dispatch will ask for again.
+                if let Some(token) = release {
+                    self.doc
+                        .inner_mut()
+                        .pending_releases
+                        .retain(|(t, _)| *t != token);
+                }
             }
             UiEvent::PointerDown(data) => {
                 self.handle_pointer_event(
@@ -334,6 +367,27 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
         make_mouse_data: Option<impl FnOnce(BlitzPointerEvent) -> DomEventData>,
         make_touch_data: impl FnOnce(BlitzPointerEvent) -> DomEventData,
     ) {
+        self.handle_pointer_event_releasing(
+            target,
+            data,
+            make_ptr_data,
+            make_mouse_data,
+            make_touch_data,
+            None,
+        );
+    }
+
+    /// [`Self::handle_pointer_event`], with the token of the press a physical
+    /// release ends, for its default action alone.
+    fn handle_pointer_event_releasing(
+        &mut self,
+        target: NodeId,
+        data: BlitzPointerEvent,
+        make_ptr_data: impl FnOnce(BlitzPointerEvent) -> DomEventData,
+        make_mouse_data: Option<impl FnOnce(BlitzPointerEvent) -> DomEventData>,
+        make_touch_data: impl FnOnce(BlitzPointerEvent) -> DomEventData,
+        release: Option<u64>,
+    ) {
         let mut ptr_event = DomEvent::new(target, make_ptr_data(data.clone()));
         let mut event_state = EventState::default();
         event_state = self.run_handler_event(&mut ptr_event, event_state);
@@ -358,7 +412,10 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
         }
 
         if !event_state.is_cancelled() {
-            self.run_default_action(&mut ptr_event);
+            let mut doc = self.doc.inner_mut();
+            doc.handle_release_dom_event(&mut ptr_event, release, |new_evt| {
+                self.queue.push_back(new_evt)
+            });
         }
         self.process_queue();
     }
