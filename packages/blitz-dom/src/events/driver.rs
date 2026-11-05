@@ -212,6 +212,13 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 hover_node_id = self.handle_pointer_move(event);
                 let mut doc = self.doc.inner_mut();
                 doc.unactive_node();
+                // The press ends here whether or not the release is cancelled.
+                let key = (event.id, event.button);
+                doc.release_origin = doc
+                    .click_origins
+                    .iter()
+                    .position(|(id, button, _)| (*id, *button) == key)
+                    .map(|i| doc.click_origins.remove(i));
 
                 if event.is_primary && matches!(event.id, BlitzPointerId::Finger(_)) {
                     hover_end_event = Some(event.clone());
@@ -271,6 +278,8 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                     Some(DomEventData::MouseUp),
                     DomEventData::TouchEnd,
                 );
+                // A cancelled release made no click, and its press is over.
+                self.doc.inner_mut().release_origin = None;
             }
             UiEvent::PointerDown(data) => {
                 self.handle_pointer_event(

@@ -325,6 +325,10 @@ pub struct BaseDocument {
     /// Where each pointer's held button went down, for the click its release
     /// makes. Taken on release, and dropped on cancel or when the node goes.
     pub(crate) click_origins: Vec<(BlitzPointerId, MouseEventButton, NodeId)>,
+    /// The press the release being handled ends, taken from `click_origins`
+    /// before any handler can cancel the release. Only that release's click
+    /// uses it.
+    pub(crate) release_origin: Option<(BlitzPointerId, MouseEventButton, NodeId)>,
     /// The last time a mousedown was made (for double-click detection)
     pub(crate) last_mousedown_time: Option<Instant>,
     /// The position where mousedown occurred (for selection drags and double-click detection)
@@ -530,6 +534,7 @@ impl BaseDocument {
             active_node_id: None,
             mousedown_node_id: None,
             click_origins: Vec::new(),
+            release_origin: None,
             has_active_animations: false,
             subdoc_is_animating: false,
             has_canvas: false,

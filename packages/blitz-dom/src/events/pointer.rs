@@ -603,10 +603,10 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
     // record, or its node gone from the document, nothing is clicked: the
     // element now under the pointer wasn't pressed.
     let origin = doc
-        .click_origins
-        .iter()
-        .position(|(id, button, _)| (*id, *button) == (event.id, event.button))
-        .map(|i| doc.click_origins.remove(i).2);
+        .release_origin
+        .take()
+        .filter(|(id, button, _)| (*id, *button) == (event.id, event.button))
+        .map(|(_, _, node)| node);
     if do_click && event.button == MouseEventButton::Main {
         let click_target = origin
             .filter(|down| is_connected(doc, *down) && is_connected(doc, target))
