@@ -8,6 +8,7 @@ use kurbo::{Affine, Rect};
 use parley::LayoutContext;
 use selectors::Element as _;
 use style::dom::TDocument;
+use web_time::Instant;
 
 #[cfg(feature = "parallel-construct")]
 use rayon::prelude::*;
@@ -21,7 +22,7 @@ thread_local! {
 use taffy::AvailableSpace;
 
 use crate::{
-    BaseDocument,
+    BaseDocument, FrameTimings,
     layout::{
         LayoutPassState,
         construct::{
@@ -75,6 +76,7 @@ impl BaseDocument {
 
         let root_node_id = self.root_element().id;
         debug_timer!(timer, feature = "log-phase-times");
+        let started = Instant::now();
 
         // Apply any device changes (viewport resize, zoom, color-scheme, etc)
         // accumulated since the last resolve as a single device rebuild.
@@ -83,6 +85,7 @@ impl BaseDocument {
         // we need to resolve stylist first since it will need to drive our layout bits
         self.resolve_stylist(current_time_for_animations);
         timer.record_time("style");
+        let styled = Instant::now();
 
         // Non-incremental mode is "every node is damaged every frame": mark the
         // whole tree and let the same damage pipeline reconstruct and relayout
@@ -124,6 +127,14 @@ impl BaseDocument {
         self.build_paint_tree(root_node_id);
         timer.record_time("paint_tree");
         self.layout_stale = false;
+        self.frame_timings = FrameTimings {
+            frame: self.frame_timings.frame + 1,
+            diff: self.pending_diff.take(),
+            style: styled - started,
+            layout: styled.elapsed(),
+            record: None,
+            render: None,
+        };
 
         // Clear all damage and dirty flags, walking only subtrees which are
         // marked as (potentially) containing damage.
@@ -464,5 +475,70 @@ impl BaseDocument {
 
         // println!("\n\n");
         // taffy::print_tree(self, root_node_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use blitz_traits::shell::{ColorScheme, Viewport};
+    use web_time::Duration;
+
+    use crate::{BaseDocument, DocumentConfig, qual_name};
+
+    fn document() -> BaseDocument {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html", html), vec![]);
+        let body = mutator.create_element(qual_name!("body", html), vec![]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        doc
+    }
+
+    #[test]
+    fn each_resolve_starts_a_frame_with_its_own_timings() {
+        let mut doc = document();
+        assert_eq!(doc.frame_timings().frame, 0);
+
+        doc.add_diff_timing(Duration::from_micros(3));
+        doc.add_diff_timing(Duration::from_micros(4));
+        doc.resolve(0.0);
+        let first = doc.frame_timings();
+        assert_eq!(first.frame, 1);
+        assert_eq!(first.diff, Some(Duration::from_micros(7)), "reports add up");
+        assert!(first.style > Duration::ZERO && first.layout > Duration::ZERO);
+        assert_eq!((first.record, first.render), (None, None));
+
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&seen);
+        let id = doc.add_frame_observer(Box::new(move |t| log.borrow_mut().push(*t)));
+        doc.finish_frame(Duration::from_micros(5), Duration::from_micros(6));
+        let painted = doc.frame_timings();
+        assert_eq!(painted.record, Some(Duration::from_micros(5)));
+        assert_eq!(painted.render, Some(Duration::from_micros(6)));
+        assert_eq!(
+            *seen.borrow(),
+            [painted],
+            "observers see the finished frame"
+        );
+
+        doc.resolve(0.0);
+        let second = doc.frame_timings();
+        assert_eq!(second.frame, 2);
+        assert_eq!(second.diff, None, "the diff belonged to the first frame");
+        assert_eq!((second.record, second.render), (None, None));
+        assert_eq!(seen.borrow().len(), 1, "a resolve alone finishes no frame");
+
+        doc.remove_frame_observer(id);
+        doc.finish_frame(Duration::ZERO, Duration::ZERO);
+        assert_eq!(seen.borrow().len(), 1, "removed");
     }
 }
