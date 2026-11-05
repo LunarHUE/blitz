@@ -21,7 +21,7 @@ use atomic_refcell::AtomicRefCell;
 use std::any::Any;
 use std::sync::Arc;
 use std::task::Waker;
-use web_time::Instant;
+use web_time::{Duration, Instant};
 use winit::event::ElementState;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Theme, WindowAttributes, WindowId};
@@ -440,7 +440,10 @@ impl<Rend: WindowRenderer> View<Rend> {
         let insets = self.safe_area_insets;
 
         if !is_blocked && is_visible {
+            let started = Instant::now();
+            let mut record = Duration::ZERO;
             self.renderer.render(|scene| {
+                let painting = Instant::now();
                 paint_scene(
                     scene,
                     &mut inner,
@@ -449,8 +452,10 @@ impl<Rend: WindowRenderer> View<Rend> {
                     height,
                     insets.left,
                     insets.top,
-                )
+                );
+                record = painting.elapsed();
             });
+            inner.finish_frame(record, started.elapsed().saturating_sub(record));
         }
 
         drop(inner);
