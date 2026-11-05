@@ -556,6 +556,7 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
     doc: &mut BaseDocument,
     target: NodeId,
     event: &BlitzPointerEvent,
+    release: Option<u64>,
     mut dispatch_event: F,
 ) {
     if doc.devtools().highlight_hover {
@@ -602,11 +603,14 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
     // leaves one control and ends on another clicks neither. With no press on
     // record, or its node gone from the document, nothing is clicked: the
     // element now under the pointer wasn't pressed.
-    let origin = doc
-        .release_origin
-        .take()
-        .filter(|(id, button, _)| (*id, *button) == (event.id, event.button))
-        .map(|(_, _, node)| node);
+    // Only the physical release that ended the press clicks from it, and only
+    // while its node never left the document.
+    let origin = release.and_then(|token| {
+        doc.pending_releases
+            .iter()
+            .find(|(t, _)| *t == token)
+            .map(|(_, node)| *node)
+    });
     if do_click && event.button == MouseEventButton::Main {
         let click_target = origin
             .filter(|down| is_connected(doc, *down) && is_connected(doc, target))

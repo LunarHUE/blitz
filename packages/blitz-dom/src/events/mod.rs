@@ -102,6 +102,7 @@ fn map_dom_event_to_ui_event(
 pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
     doc: &mut BaseDocument,
     event: &mut DomEvent,
+    release: Option<u64>,
     mut dispatch_event: F,
 ) {
     let target_node_id = event.target;
@@ -203,7 +204,7 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
             // Do nothing (handled in PointerDown)
         }
         DomEventData::PointerUp(event) => {
-            handle_pointerup(doc, target_node_id, event, dispatch_event);
+            handle_pointerup(doc, target_node_id, event, release, dispatch_event);
         }
         DomEventData::MouseUp(_) => {
             // Do nothing (handled in PointerUp)
