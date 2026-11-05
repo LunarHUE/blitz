@@ -20,7 +20,7 @@ use crate::{
     TextNodeData,
 };
 use blitz_traits::devtools::DevtoolSettings;
-use blitz_traits::events::{DomEvent, HitResult, UiEvent};
+use blitz_traits::events::{BlitzPointerId, DomEvent, HitResult, MouseEventButton, UiEvent};
 use blitz_traits::navigation::{DummyNavigationProvider, NavigationProvider};
 use blitz_traits::net::{AbortSignal, DummyNetProvider, NetProvider, Request};
 use blitz_traits::node_id::NodeId;
@@ -322,6 +322,9 @@ pub struct BaseDocument {
     pub(crate) active_node_id: Option<NodeId>,
     /// The node which recieved a mousedown event (if any)
     pub(crate) mousedown_node_id: Option<NodeId>,
+    /// Where each pointer's held button went down, for the click its release
+    /// makes. Taken on release, and dropped on cancel or when the node goes.
+    pub(crate) click_origins: Vec<(BlitzPointerId, MouseEventButton, NodeId)>,
     /// The last time a mousedown was made (for double-click detection)
     pub(crate) last_mousedown_time: Option<Instant>,
     /// The position where mousedown occurred (for selection drags and double-click detection)
@@ -526,6 +529,7 @@ impl BaseDocument {
             refresh_hover_on_resolve: true,
             active_node_id: None,
             mousedown_node_id: None,
+            click_origins: Vec::new(),
             has_active_animations: false,
             subdoc_is_animating: false,
             has_canvas: false,
@@ -978,6 +982,7 @@ impl BaseDocument {
         if self.mousedown_node_id == Some(node_id) {
             self.mousedown_node_id = None;
         }
+        self.click_origins.retain(|(_, _, n)| *n != node_id);
         if self.text_selection.anchor.node_or_parent == Some(node_id)
             || self.text_selection.focus.node_or_parent == Some(node_id)
         {

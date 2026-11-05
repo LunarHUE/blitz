@@ -597,18 +597,26 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
         }
     }
 
-    // Dispatch a click event, at the nearest element holding both where the
-    // press began and where it ended, as browsers do: a press that leaves one
-    // control and ends on another clicks neither.
+    // The click goes to the nearest element holding both where this pointer's
+    // button went down and where it came up, as browsers do: a press that
+    // leaves one control and ends on another clicks neither. With no press on
+    // record, or its node gone from the document, nothing is clicked: the
+    // element now under the pointer wasn't pressed.
+    let origin = doc
+        .click_origins
+        .iter()
+        .position(|(id, button, _)| (*id, *button) == (event.id, event.button))
+        .map(|i| doc.click_origins.remove(i).2);
     if do_click && event.button == MouseEventButton::Main {
-        let click_target = doc
-            .mousedown_node_id
-            .and_then(|down| common_ancestor(doc, down, target))
-            .unwrap_or(target);
-        dispatch_event(DomEvent::new(
-            click_target,
-            DomEventData::Click(event.clone()),
-        ));
+        let click_target = origin
+            .filter(|down| is_connected(doc, *down) && is_connected(doc, target))
+            .and_then(|down| common_ancestor(doc, down, target));
+        if let Some(click_target) = click_target {
+            dispatch_event(DomEvent::new(
+                click_target,
+                DomEventData::Click(event.clone()),
+            ));
+        }
     }
 
     // Dispatch a context menu event
@@ -617,6 +625,20 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
             target,
             DomEventData::ContextMenu(event.clone()),
         ));
+    }
+}
+
+/// Whether `node` is still in the document, not removed or detached.
+fn is_connected(doc: &BaseDocument, mut node: NodeId) -> bool {
+    let root = doc.root_node().id;
+    loop {
+        if node == root {
+            return true;
+        }
+        match doc.get_node(node).and_then(|n| n.parent) {
+            Some(parent) => node = parent,
+            None => return false,
+        }
     }
 }
 

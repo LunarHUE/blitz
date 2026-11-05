@@ -202,6 +202,11 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 let mut doc = self.doc.inner_mut();
                 doc.active_node();
                 doc.set_mousedown_node_id(hover_node_id);
+                doc.click_origins
+                    .retain(|(id, button, _)| (*id, *button) != (event.id, event.button));
+                if let Some(down) = hover_node_id {
+                    doc.click_origins.push((event.id, event.button, down));
+                }
             }
             UiEvent::PointerUp(event) => {
                 hover_node_id = self.handle_pointer_move(event);
@@ -216,6 +221,7 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 hover_node_id = self.handle_pointer_move(event);
                 let mut doc = self.doc.inner_mut();
                 doc.unactive_node();
+                doc.click_origins.retain(|(id, _, _)| *id != event.id);
 
                 if event.is_primary && matches!(event.id, BlitzPointerId::Finger(_)) {
                     hover_end_event = Some(event.clone());
