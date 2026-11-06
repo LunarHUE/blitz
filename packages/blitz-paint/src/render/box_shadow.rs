@@ -113,6 +113,7 @@ impl ElementCx<'_, '_> {
 
             // TODO draw shadows with matching individual radii instead of averaging
             let radius = self.frame.border_radii.average();
+            // TODO: offset in the element's coordinates and device pixels, as outset shadows do; the padding-box clip keeps culling safe.
             let transform = self.transform.then_translate(Vec2 {
                 x: shadow.base.horizontal.px() as f64,
                 y: shadow.base.vertical.px() as f64,
