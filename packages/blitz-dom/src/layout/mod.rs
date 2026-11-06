@@ -24,8 +24,8 @@ use taffy::{
 
 pub(crate) mod construct;
 pub(crate) mod damage;
-pub(crate) mod inline;
 pub(crate) mod ink;
+pub(crate) mod inline;
 pub(crate) mod list;
 pub(crate) mod paint_tree;
 pub(crate) mod replaced;
