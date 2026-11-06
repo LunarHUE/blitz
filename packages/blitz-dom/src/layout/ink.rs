@@ -18,7 +18,7 @@ use style::values::specified::border::BorderStyle;
 
 use crate::BaseDocument;
 use crate::glyph_ink::{Face, GlyphInk};
-use crate::node::{ListItemLayout, ListItemLayoutPosition, TextBrush};
+use crate::node::{ListItemLayout, ListItemLayoutPosition, Marker, TextBrush};
 use blitz_traits::node_id::NodeId;
 
 /// Ink that can't be bounded. Large enough to contain any viewport, small
@@ -109,35 +109,34 @@ pub(crate) fn text_ink(doc: &BaseDocument, node_id: NodeId, scale: f64) -> Optio
     }
 
     if let Some(ListItemLayout {
-        position: ListItemLayoutPosition::Outside(marker),
-        ..
+        marker,
+        position: ListItemLayoutPosition::Outside(layout),
     }) = element.list_item_data.as_deref()
     {
-        // Paint right-aligns the marker up to 8px left of the border box
-        // and aligns its baseline with the first line's. Its box, grown by
-        // its largest font size on every side, covers both.
-        let em = marker
-            .lines()
-            .flat_map(|l| l.items())
-            .filter_map(|item| match item {
-                PositionedLayoutItem::GlyphRun(run) => Some(f64::from(run.run().font_size())),
-                _ => None,
-            })
-            .fold(0.0, f64::max);
-        let width = f64::from(marker.full_width());
-        let height = f64::from(marker.height());
-        let text_height = element.inline_layout_data.as_ref().map_or(0.0, |t| {
-            f64::from(t.layout.height() + t.block_offset * scale as f32)
-        });
-        let reach = 2.0 * em;
+        // Where paint puts the marker: right-aligned left of the border
+        // box, 8px further for a bullet, with its first baseline on the
+        // item's first baseline.
+        let padding = match marker {
+            Marker::Char(_) => 8.0,
+            Marker::String(_) => 0.0,
+        };
+        let marker_scale = f64::from(layout.scale());
+        let x = -(f64::from(layout.full_width()) / marker_scale + padding);
+        let first = |l: &parley::Layout<TextBrush>| l.lines().next().map(|l| l.metrics().baseline);
+        let y = match (element.inline_layout_data.as_ref(), first(layout)) {
+            (Some(text), Some(marker_baseline)) => match first(&text.layout) {
+                Some(text_baseline) => {
+                    f64::from(text_baseline - marker_baseline) / marker_scale
+                        + f64::from(text.block_offset)
+                }
+                None => 0.0,
+            },
+            _ => 0.0,
+        };
+        let origin = Vec2::new(x, pb_top + y) * scale;
         ink = union(
             ink,
-            Some(Rect::new(
-                -(width + 8.0 * scale) - reach,
-                pb_top * scale - height - reach,
-                reach,
-                pb_top * scale + text_height + height + reach,
-            )),
+            lines_ink(doc, layout, node_id, scale).map(|r| r + origin),
         );
     }
 

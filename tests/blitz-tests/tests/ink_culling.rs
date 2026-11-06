@@ -263,3 +263,17 @@ fn a_glyph_taller_than_its_font_says_is_painted() {
     let hidden = body.replacen("id='box' style='", "id='box' style='display:none; ", 1);
     assert!(count(body) > count(&hidden));
 }
+
+#[test]
+fn an_outside_markers_far_underline_is_painted() {
+    // An empty item 180px above the viewport; its marker's underline is
+    // 200px below the marker's baseline.
+    assert!(
+        painted_by_box(
+            "<ol style='margin:0; padding:0;'>\
+         <li id='box' style='position:absolute; left:40px; top:-180px; width:40px; \
+         font-size:10px; list-style-position:outside; text-decoration:underline; \
+         text-underline-offset:200px; text-decoration-thickness:4px;'></li></ol>"
+        ) > 0
+    );
+}
