@@ -10,12 +10,14 @@ mod gradient;
 mod kurbo_css;
 mod layers;
 mod render;
+mod simplify;
 mod sizing;
 mod text;
 mod text_overflow;
 #[doc(hidden)]
 pub use text_overflow::line_groups;
 
+pub use simplify::{INK_COVERAGE, PaintStats, SIMPLIFY_ATTR};
 pub use text::synthetic_bold;
 
 use std::collections::HashMap;
@@ -54,6 +56,19 @@ pub fn paint_scene(
     x_offset: u32,
     y_offset: u32,
 ) {
+    paint_scene_with_stats(scene, doc, scale, width, height, x_offset, y_offset);
+}
+
+/// As [`paint_scene`], and says what [`SIMPLIFY_ATTR`] hints simplified.
+pub fn paint_scene_with_stats(
+    scene: &mut impl PaintScene,
+    doc: &mut BaseDocument,
+    scale: f64,
+    width: u32,
+    height: u32,
+    x_offset: u32,
+    y_offset: u32,
+) -> PaintStats {
     // Run `.paint()` on every custom widget in the document (and all subdocuments) ahead of time.
     // This helps us avoid borrow-checker issues as we recurse down the tree (`.paint()` require `&mut self`).
     //
@@ -73,6 +88,7 @@ pub fn paint_scene(
         &custom_widget_scenes,
     );
     generator.paint_scene(scene);
+    let stats = generator.stats();
 
     // println!(
     //     "Rendered using {} clips (depth: {}) (wanted: {})",
@@ -80,6 +96,7 @@ pub fn paint_scene(
     //     CLIP_DEPTH_USED.load(atomic::Ordering::SeqCst),
     //     CLIPS_WANTED.load(atomic::Ordering::SeqCst)
     // );
+    stats
 }
 
 #[cfg(feature = "custom-widget")]

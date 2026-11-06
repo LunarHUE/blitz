@@ -5,7 +5,7 @@ mod clip_path;
 mod form_controls;
 mod mask;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ use crate::debug_overlay::render_debug_overlay;
 use crate::filters::convert_filters;
 use crate::kurbo_css::NonUniformRoundedRectRadii;
 use crate::layers::LayerManager;
+use crate::simplify::{PaintStats, SIMPLIFY_ATTR, Simplify};
 use crate::sizing::compute_object_fit;
 use crate::text::DrawTextContext;
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
@@ -23,7 +24,7 @@ use blitz_dom::node::{
     ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
     TextNodeData,
 };
-use blitz_dom::{BaseDocument, ElementData, Node, NodeId, local_name};
+use blitz_dom::{BaseDocument, ElementData, LocalName, Node, NodeId, local_name};
 use blitz_traits::devtools::DevtoolSettings;
 
 use style::values::computed::{BorderCornerRadius, ColorOrAuto};
@@ -126,6 +127,15 @@ pub struct BlitzDomPainter<'dom, 'a> {
 
     // Pre-computed `Scene`s for each CustomWidget
     pub(crate) custom_widget_scenes: &'a CustomWidgetSceneMap,
+
+    /// The [`SIMPLIFY_ATTR`] name, interned once per scene.
+    pub(crate) simplify_attr: LocalName,
+    /// The simplify hint of the nearest hinted ancestor being painted.
+    pub(crate) simplify: Cell<Option<Simplify>>,
+    /// What this pass simplified.
+    pub(crate) stats: Cell<PaintStats>,
+    /// Ink boxes of the inline layout being simplified, reused across layouts.
+    pub(crate) ink_boxes: RefCell<Vec<(Rect, Color)>>,
 }
 
 impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
@@ -164,7 +174,22 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             draw_text_context: RefCell::new(DrawTextContext::default()),
             selection_ranges,
             custom_widget_scenes,
+            simplify_attr: LocalName::from(SIMPLIFY_ATTR),
+            simplify: Cell::new(None),
+            stats: Cell::new(PaintStats::default()),
+            ink_boxes: RefCell::new(Vec::new()),
         }
+    }
+
+    /// What the pass simplified so far.
+    pub fn stats(&self) -> PaintStats {
+        self.stats.get()
+    }
+
+    fn count(&self, f: impl FnOnce(&mut PaintStats)) {
+        let mut stats = self.stats.get();
+        f(&mut stats);
+        self.stats.set(stats);
     }
 
     /// Draw the current tree to current render surface
@@ -290,6 +315,35 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         node_id: NodeId,
         parent_style_transform: Affine,
         clip_rect: Rect,
+    ) {
+        let node = &self.dom.as_ref().tree()[node_id];
+        let hint = node
+            .element_data()
+            .and_then(|e| e.attrs.iter().find(|a| a.name.local == self.simplify_attr))
+            .map(|a| Simplify::parse(&a.value));
+        let Some(hint) = hint else {
+            return self.render_element_in(
+                scene,
+                node_id,
+                parent_style_transform,
+                clip_rect,
+                false,
+            );
+        };
+        let outer = self.simplify.replace(Some(hint));
+        self.render_element_in(scene, node_id, parent_style_transform, clip_rect, true);
+        self.simplify.set(outer);
+    }
+
+    /// As [`Self::render_element`], under the simplify hint already in
+    /// force. `hinted` is whether this element set it.
+    fn render_element_in(
+        &self,
+        scene: &mut impl PaintScene,
+        node_id: NodeId,
+        parent_style_transform: Affine,
+        clip_rect: Rect,
+        hinted: bool,
     ) {
         let node = &self.dom.as_ref().tree()[node_id];
 
@@ -426,6 +480,28 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             return;
         }
 
+        if hinted {
+            self.count(|s| s.hinted += 1);
+        }
+        // A small descendant of a hinted element, with its children laid out
+        // inside it, paints only its own box.
+        let flatten = !hinted
+            && !node.children.is_empty()
+            && self.simplify.get().is_some_and(|hint| {
+                let k = crate::simplify::linear_scale(transform);
+                let (w, h) = (box_size.width * self.scale, box_size.height * self.scale);
+                hint.frame > 0.0
+                    && w * k < hint.frame
+                    && h * k < hint.frame
+                    && overflow.x0 >= 0.0
+                    && overflow.y0 >= 0.0
+                    && overflow.x1 <= w
+                    && overflow.y1 <= h
+            });
+        if flatten {
+            self.count(|s| s.flattened += 1);
+        }
+
         #[cfg(feature = "custom-widget")]
         let custom_widget_scene = self.custom_widget_scenes.get(&(self.dom.id(), node_id));
         #[cfg(not(feature = "custom-widget"))]
@@ -554,6 +630,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             None,
                             None,
                             |scene| {
+                                if flatten {
+                                    return;
+                                }
                                 // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
                                 let content_position = Point {
                                     x: content_position.x - node.scroll_offset().x,
@@ -916,7 +995,22 @@ impl ElementCx<'_, '_> {
                 );
             }
 
-            // Render text
+            // Render text, as ink boxes when it projects small under a hint
+            if let Some(hint) = self.context.simplify.get().filter(|h| h.text > 0.0)
+                && ellipsis.is_none()
+                && crate::simplify::draw_ink_boxes(
+                    scene,
+                    &text_layout.layout,
+                    self.context.dom,
+                    transform,
+                    self.scale,
+                    hint.text,
+                    &mut self.context.ink_boxes.borrow_mut(),
+                )
+            {
+                self.context.count(|s| s.text_boxes += 1);
+                return;
+            }
             let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text_in(
                 scene,
