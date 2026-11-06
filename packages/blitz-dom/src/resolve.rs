@@ -204,14 +204,12 @@ impl BaseDocument {
         let h = self.nodes[node_id].final_layout().size.height as f64 * scale;
         let mut overflow = Rect::new(0.0, 0.0, w, h);
         let mut ink = match self.nodes[node_id].primary_styles() {
-            Some(style) => {
-                let has_text = self.nodes[node_id]
-                    .element_data()
-                    .is_some_and(|e| e.inline_layout_data.is_some());
-                crate::layout::ink::own_ink(&style, overflow, scale, has_text)
-            }
+            Some(style) => crate::layout::ink::own_ink(&style, overflow, scale),
             None => overflow,
         };
+        if let Some(text) = crate::layout::ink::text_ink(self, node_id, scale) {
+            ink = ink.union(text);
+        }
 
         let layout_children = std::mem::take(self.nodes[node_id].layout_children.get_mut());
 

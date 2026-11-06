@@ -170,3 +170,65 @@ fn a_shadow_under_a_rotated_ancestor_turns_with_it() {
     let mut doc = document(&shadowed_under("rotate(180deg)", 110));
     assert!(is_red(pixel(&mut doc, 30, 60)));
 }
+
+/// Paint commands recorded for `body`, less those recorded with the
+/// element marked `id='box'` not displayed. Positive when it paints.
+fn painted_by_box(body: &str) -> usize {
+    let count = |body: &str| {
+        let mut doc = document(body);
+        let mut scene = anyrender::Scene::new();
+        paint_scene(&mut scene, &mut doc, 1.0, SIZE, SIZE, 0, 0);
+        scene.commands.len()
+    };
+    let hidden = body.replacen("id='box' style='", "id='box' style='display:none; ", 1);
+    count(body).saturating_sub(count(&hidden))
+}
+
+#[test]
+fn a_long_line_from_a_narrow_box_is_painted() {
+    // The box ends 290px left of the viewport; its unwrapped line doesn't.
+    assert!(
+        painted_by_box(
+            "<div id='box' style='position:absolute; left:-300px; top:20px; width:10px; \
+         white-space:pre; font-size:20px; color:#ff0000;'>\
+         MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM</div>"
+        ) > 0
+    );
+}
+
+#[test]
+fn a_far_underline_is_painted() {
+    // Text 180px above the viewport, underlined 200px below its baseline.
+    assert!(
+        painted_by_box(
+            "<div id='box' style='position:absolute; left:10px; top:-180px; width:80px; \
+         font-size:10px; text-decoration:underline; text-underline-offset:200px; \
+         text-decoration-thickness:4px;'>Hamburgefonstiv</div>"
+        ) > 0
+    );
+}
+
+#[test]
+fn a_larger_inline_run_than_its_root_is_painted() {
+    // A one pixel line box 15px below the viewport, holding an 80px run
+    // whose glyphs rise into view.
+    assert!(
+        painted_by_box(
+            "<div id='box' style='position:absolute; left:10px; top:115px; width:80px; \
+         font-size:10px; line-height:1px;'><span style='font-size:80px;'>H</span></div>"
+        ) > 0
+    );
+}
+
+#[test]
+fn a_wide_outside_marker_is_painted() {
+    // The item's box starts 15px right of the viewport; its nine digit
+    // marker is drawn to the left of it, into view.
+    assert!(
+        painted_by_box(
+            "<ol style='margin:0; padding:0;' start='100000000'>\
+         <li id='box' style='position:absolute; left:115px; top:20px; width:40px; \
+         font-size:10px; list-style-position:outside;'>x</li></ol>"
+        ) > 0
+    );
+}
