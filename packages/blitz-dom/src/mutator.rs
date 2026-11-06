@@ -61,6 +61,10 @@ pub struct DocumentMutator<'doc> {
     /// Whether any mutation that affects rendered output has been performed
     mutations_occurred: bool,
 
+    /// Whether a paint-only attribute changed, which needs a redraw and no
+    /// restyle or layout
+    repaint: bool,
+
     /// The (latest) node which has been mounted in and had autofocus=true, if any
     #[cfg(feature = "autofocus")]
     node_to_autofocus: Option<NodeId>,
@@ -71,6 +75,8 @@ impl Drop for DocumentMutator<'_> {
         self.flush(); // Defined at bottom of file
         if self.mutations_occurred {
             self.doc.layout_stale = true;
+            self.doc.shell_provider.request_redraw();
+        } else if self.repaint {
             self.doc.shell_provider.request_redraw();
         }
     }
@@ -86,6 +92,7 @@ impl DocumentMutator<'_> {
             form_nodes: HashSet::new(),
             recompute_is_animating: false,
             mutations_occurred: false,
+            repaint: false,
             #[cfg(feature = "autofocus")]
             node_to_autofocus: None,
         }
@@ -268,6 +275,13 @@ impl DocumentMutator<'_> {
 
     pub fn set_attribute(&mut self, node_id: NodeId, name: QualName, value: &str) {
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
+        if is_paint_only(&name) {
+            if let Some(element) = self.doc.nodes[node_id].element_data_mut() {
+                element.attrs.set(name, value);
+                self.repaint |= node_is_in_document;
+            }
+            return;
+        }
         if node_is_in_document {
             self.doc.snapshot_node(node_id);
 
@@ -418,6 +432,14 @@ impl DocumentMutator<'_> {
 
     pub fn clear_attribute(&mut self, node_id: NodeId, name: QualName) {
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
+        if is_paint_only(&name) {
+            if let Some(element) = self.doc.nodes[node_id].element_data_mut() {
+                if element.attrs.remove(&name).is_some() {
+                    self.repaint |= node_is_in_document;
+                }
+            }
+            return;
+        }
         if node_is_in_document {
             self.doc.snapshot_node(node_id);
 
@@ -1386,6 +1408,12 @@ impl Drop for ViewportMut<'_> {
         let changes = DeviceChanges::from_viewports(&self.initial_viewport, &self.doc.viewport);
         self.doc.queue_device_changes(changes);
     }
+}
+
+/// Whether `name` is an attribute only painting reads; see
+/// [`crate::SIMPLIFY_ATTR`].
+fn is_paint_only(name: &QualName) -> bool {
+    name.ns.is_empty() && *name.local == *crate::SIMPLIFY_ATTR
 }
 
 #[cfg(test)]
