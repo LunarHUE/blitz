@@ -488,7 +488,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let flatten = !hinted
             && !node.children.is_empty()
             && self.simplify.get().is_some_and(|hint| {
-                let k = crate::simplify::linear_scale(transform);
+                let k = crate::simplify::stretch(transform).1;
                 let (w, h) = (box_size.width * self.scale, box_size.height * self.scale);
                 hint.frame > 0.0
                     && w * k < hint.frame

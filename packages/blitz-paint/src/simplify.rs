@@ -77,10 +77,18 @@ pub struct PaintStats {
     pub flattened: u32,
 }
 
-/// How many device pixels one unit of `transform`'s output space spans
-/// along an axis, on average.
-pub(crate) fn linear_scale(transform: Affine) -> f64 {
-    transform.determinant().abs().sqrt()
+/// The least and most a unit length is stretched by `transform`'s linear
+/// part, over every direction: its singular values. Skew and unequal axis
+/// scales give different values; a rotation or uniform scale the same.
+pub(crate) fn stretch(transform: Affine) -> (f64, f64) {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    let sum = a * a + b * b + c * c + d * d;
+    let det = a * d - b * c;
+    let root = (sum * sum - 4.0 * det * det).max(0.0).sqrt();
+    (
+        ((sum - root) / 2.0).max(0.0).sqrt(),
+        ((sum + root) / 2.0).sqrt(),
+    )
 }
 
 /// Paints `layout`'s glyph runs as ink boxes if it qualifies, and says
@@ -95,7 +103,7 @@ pub(crate) fn draw_ink_boxes(
     boxes: &mut Vec<(Rect, crate::color::Color)>,
 ) -> bool {
     boxes.clear();
-    let k = linear_scale(transform);
+    let (least, most) = stretch(transform);
     for line in layout.lines() {
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
@@ -103,7 +111,9 @@ pub(crate) fn draw_ink_boxes(
             };
             let run = glyph_run.run();
             let font_size = run.font_size();
-            if f64::from(font_size) * k >= text || run.synthesis().skew().is_some() {
+            // NaN from a degenerate transform fails the comparison too.
+            let projected = f64::from(font_size) * most;
+            if !(projected < text) || run.synthesis().skew().is_some() {
                 return false;
             }
             let face = Face::of(run);
@@ -140,9 +150,11 @@ pub(crate) fn draw_ink_boxes(
                 continue;
             };
             // Hinting can pull an outline's edges up to half a device pixel
-            // inside its unhinted bounds; keep the box inside either.
+            // inside its unhinted bounds; keep the box inside either. Half a
+            // device pixel spans the most layout units along the least
+            // stretched direction.
             if hinted {
-                let half = 0.5 / k.max(f64::EPSILON);
+                let half = 0.5 / least.max(f64::EPSILON);
                 ink = ink.inset(-half);
                 if ink.width() <= 0.0 || ink.height() <= 0.0 {
                     continue;
@@ -304,6 +316,23 @@ impl skrifa::outline::OutlinePen for PathPen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stretch_is_the_least_and_most_scale_over_directions() {
+        let close = |(a, b): (f64, f64), (c, d): (f64, f64)| {
+            assert!((a - c).abs() < 1e-9 && (b - d).abs() < 1e-9, "{a} {b}");
+        };
+        close(stretch(Affine::scale(2.0)), (2.0, 2.0));
+        close(stretch(Affine::scale_non_uniform(10.0, 0.1)), (0.1, 10.0));
+        close(
+            stretch(Affine::rotate(1.0) * Affine::scale(3.0)),
+            (3.0, 3.0),
+        );
+        // skewX(45deg): [1 1; 0 1] stretches by the golden ratio.
+        let phi = (1.0 + 5f64.sqrt()) / 2.0;
+        close(stretch(Affine::skew(1.0, 0.0)), (1.0 / phi, phi));
+        close(stretch(Affine::scale(0.0)), (0.0, 0.0));
+    }
 
     #[test]
     fn parses_known_pairs_and_ignores_the_rest() {

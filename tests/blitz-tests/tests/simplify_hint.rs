@@ -285,3 +285,43 @@ fn synthetic_bold_boxes_stay_inside_the_glyphs() {
     let full = ink(&pixels(&mut plain)).unwrap();
     assert!(inside(simplified, full), "{simplified:?} outside {full:?}");
 }
+
+/// Text 12px tall under `transform`, hinted with a 20 device pixel
+/// threshold.
+fn stretched(transform: &str) -> (HtmlDocument, HtmlDocument) {
+    pair(
+        &format!(
+            r#"<div style="transform: {transform}; transform-origin: 0 0; width: 200px">
+                <div HINT>Stretched words</div>
+            </div>"#
+        ),
+        "text=20",
+    )
+}
+
+#[test]
+fn text_stretched_along_one_axis_counts_its_longest_extent() {
+    // The area scale is 1, but glyphs span 120 device pixels across.
+    let (mut hinted, _) = stretched("scale(10, 0.1)");
+    let (commands, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 0);
+    assert!(glyph_runs(&commands) > 0);
+}
+
+#[test]
+fn skewed_text_counts_its_longest_extent() {
+    // A skew keeps area but stretches one diagonal past 5x.
+    let (mut hinted, _) = stretched("skewX(80deg)");
+    let (_, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 0);
+}
+
+#[test]
+fn text_small_along_both_axes_still_simplifies() {
+    let (mut hinted, mut plain) = stretched("scale(0.5, 0.25)");
+    let (_, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 1);
+    let simplified = ink(&pixels(&mut hinted)).unwrap();
+    let full = ink(&pixels(&mut plain)).unwrap();
+    assert!(inside(simplified, full), "{simplified:?} outside {full:?}");
+}
