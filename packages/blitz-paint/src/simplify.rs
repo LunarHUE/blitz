@@ -25,6 +25,7 @@ use blitz_dom::{BaseDocument, NodeId};
 use kurbo::{Affine, Rect};
 use parley::{Layout, PositionedLayoutItem};
 use peniko::Fill;
+use std::collections::HashMap;
 
 use crate::FONT_EMBOLDEN_ENABLED;
 use crate::text::{glyph_style, synthetic_bold};
@@ -94,9 +95,6 @@ pub(crate) fn draw_ink_boxes(
     text: f64,
     boxes: &mut Vec<(Rect, crate::color::Color)>,
 ) -> bool {
-    use skrifa::MetadataProvider as _;
-    use skrifa::instance::{LocationRef, Size};
-
     boxes.clear();
     let k = linear_scale(transform);
     for line in layout.lines() {
@@ -109,16 +107,8 @@ pub(crate) fn draw_ink_boxes(
             if f64::from(font_size) * k >= text || run.synthesis().skew().is_some() {
                 return false;
             }
-            let font = run.font();
-            let Ok(face) = skrifa::FontRef::from_index(font.data.as_ref(), font.index) else {
-                return false;
-            };
-            let raw: &[i16] = bytemuck::cast_slice(run.normalized_coords());
-            let coords: Vec<skrifa::raw::types::F2Dot14> = raw
-                .iter()
-                .map(|&c| skrifa::raw::types::F2Dot14::from_bits(c))
-                .collect();
-            let metrics = face.glyph_metrics(Size::new(font_size), LocationRef::new(&coords));
+            let face = Face::of(run);
+            let em = f64::from(font_size) / f64::from(face.units_per_em);
 
             let node_id: NodeId = glyph_run.style().brush.id;
             let bold = synthetic_bold(doc, node_id, run);
@@ -131,18 +121,17 @@ pub(crate) fn draw_ink_boxes(
             for glyph in glyph_run.glyphs() {
                 let at = f64::from(pen + glyph.x);
                 pen += glyph.advance;
-                let Some(b) = metrics.bounds(skrifa::GlyphId::new(glyph.id)) else {
-                    return false;
+                let b = match face.ink(glyph.id) {
+                    Ink::Box(b) => b,
+                    Ink::Empty => continue,
+                    Ink::Unknown => return false,
                 };
-                if b.x_max <= b.x_min || b.y_max <= b.y_min {
-                    continue;
-                }
                 let y = baseline + f64::from(glyph.y);
                 let r = Rect::new(
-                    at + f64::from(b.x_min),
-                    y - f64::from(b.y_max),
-                    at + f64::from(b.x_max),
-                    y - f64::from(b.y_min),
+                    at + f64::from(b[0]) * em,
+                    y - f64::from(b[3]) * em,
+                    at + f64::from(b[2]) * em,
+                    y - f64::from(b[1]) * em,
                 )
                 .inflate(embolden.x, embolden.y);
                 ink = Some(ink.map_or(r, |i| i.union(r)));
@@ -171,6 +160,145 @@ pub(crate) fn draw_ink_boxes(
         scene.fill(Fill::NonZero, transform, *color, None, rect);
     }
     true
+}
+
+/// A glyph's ink in font units at a run's variation coordinates: its
+/// outline's exact bounds, y up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Ink {
+    Box([f32; 4]),
+    /// No outline to paint, as for a space.
+    Empty,
+    /// No outline could be read; the layout keeps its glyphs.
+    Unknown,
+}
+
+/// Font, face index and variation coordinates, hashed.
+type FaceKey = (u64, u32, u64);
+
+/// Ink of every glyph seen, kept across paints so a zoom reads it from
+/// here rather than from the font. Cleared whole when it grows past
+/// [`INK_CACHE_LIMIT`] glyphs.
+const INK_CACHE_LIMIT: usize = 1 << 16;
+
+thread_local! {
+    static INK_CACHE: std::cell::RefCell<HashMap<(FaceKey, u32), Ink>> =
+        std::cell::RefCell::new(HashMap::new());
+    static UPEM_CACHE: std::cell::RefCell<HashMap<(u64, u32), u16>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A run's face, read from the font only for glyphs not yet cached.
+struct Face<'a> {
+    key: FaceKey,
+    data: &'a [u8],
+    index: u32,
+    coords: &'a [i16],
+    units_per_em: u16,
+}
+
+impl<'a> Face<'a> {
+    fn of(run: &'a parley::Run<'a, TextBrush>) -> Face<'a> {
+        use std::hash::{Hash as _, Hasher as _};
+        let font = run.font();
+        let coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        coords.hash(&mut h);
+        let id = (font.data.id(), font.index);
+        let units_per_em = UPEM_CACHE.with(|c| {
+            *c.borrow_mut().entry(id).or_insert_with(|| {
+                use skrifa::raw::TableProvider as _;
+                skrifa::FontRef::from_index(font.data.as_ref(), font.index)
+                    .ok()
+                    .and_then(|f| f.head().ok())
+                    .map_or(0, |head| head.units_per_em())
+            })
+        });
+        Face {
+            key: (id.0, id.1, h.finish()),
+            data: font.data.as_ref(),
+            index: font.index,
+            coords,
+            units_per_em: units_per_em.max(1),
+        }
+    }
+
+    fn ink(&self, glyph: u32) -> Ink {
+        if self.units_per_em <= 1 {
+            return Ink::Unknown;
+        }
+        let key = (self.key, glyph);
+        if let Some(ink) = INK_CACHE.with(|c| c.borrow().get(&key).copied()) {
+            return ink;
+        }
+        let ink = self.read(glyph);
+        INK_CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() >= INK_CACHE_LIMIT {
+                c.clear();
+            }
+            c.insert(key, ink);
+        });
+        ink
+    }
+
+    fn read(&self, glyph: u32) -> Ink {
+        use skrifa::MetadataProvider as _;
+        use skrifa::instance::{LocationRef, Size};
+        use skrifa::outline::DrawSettings;
+        let Ok(font) = skrifa::FontRef::from_index(self.data, self.index) else {
+            return Ink::Unknown;
+        };
+        let Some(outline) = font.outline_glyphs().get(skrifa::GlyphId::new(glyph)) else {
+            return Ink::Unknown;
+        };
+        let coords: Vec<skrifa::raw::types::F2Dot14> = self
+            .coords
+            .iter()
+            .map(|&c| skrifa::raw::types::F2Dot14::from_bits(c))
+            .collect();
+        let mut pen = PathPen(kurbo::BezPath::new());
+        let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::new(&coords));
+        if outline.draw(settings, &mut pen).is_err() {
+            return Ink::Unknown;
+        }
+        if pen.0.elements().is_empty() {
+            return Ink::Empty;
+        }
+        // Exact: kurbo bounds curves by their extrema, not control points.
+        let b = kurbo::Shape::bounding_box(&pen.0);
+        if b.width() <= 0.0 || b.height() <= 0.0 {
+            return Ink::Empty;
+        }
+        Ink::Box([b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32])
+    }
+}
+
+struct PathPen(kurbo::BezPath);
+
+impl skrifa::outline::OutlinePen for PathPen {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.0.move_to((f64::from(x), f64::from(y)));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.0.line_to((f64::from(x), f64::from(y)));
+    }
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        self.0.quad_to(
+            (f64::from(cx0), f64::from(cy0)),
+            (f64::from(x), f64::from(y)),
+        );
+    }
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        self.0.curve_to(
+            (f64::from(cx0), f64::from(cy0)),
+            (f64::from(cx1), f64::from(cy1)),
+            (f64::from(x), f64::from(y)),
+        );
+    }
+    fn close(&mut self) {
+        self.0.close_path();
+    }
 }
 
 #[cfg(test)]
