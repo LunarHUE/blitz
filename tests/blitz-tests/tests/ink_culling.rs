@@ -1,7 +1,8 @@
 //! Paint culls an element only when nothing it paints can reach the
 //! viewport. Each element here has its box just outside a 100x100 viewport,
 //! past its right edge, and paints red across that edge with a shadow, an
-//! outline or a filter. The pixel at (90, 40) must be red.
+//! outline or a transform. The pixel at (90, 40) must be red. Filters,
+//! which the CPU renderer doesn't draw yet, are checked through the bound.
 
 use anyrender::render_to_buffer;
 use anyrender_vello_cpu::VelloCpuImageRenderer;
@@ -78,12 +79,22 @@ fn an_outline_offset_reaching_the_viewport_is_painted() {
     assert!(is_red(pixel(&mut doc, 90, 40)));
 }
 
+/// The ink bound of the element with id `box`, in its own device pixels.
+fn ink(style: &str) -> kurbo::Rect {
+    let doc = document(&outside(style).replace("<div ", "<div id='box' "));
+    let id = doc.get_element_by_id("box").unwrap();
+    *doc.get_node(id).unwrap().ink_overflow()
+}
+
 #[test]
-fn a_drop_shadow_filter_reaching_the_viewport_is_painted() {
-    let mut doc = document(&outside(
-        "background: #ff0000; filter: drop-shadow(-30px 0px 0px #ff0000);",
-    ));
-    assert!(is_red(pixel(&mut doc, 90, 40)));
+fn filters_widen_the_ink_bound() {
+    // The CPU renderer draws neither filter yet, so this checks the bound
+    // paint culls against rather than pixels.
+    assert_eq!(ink(""), kurbo::Rect::new(0.0, 0.0, 40.0, 40.0));
+    let shadow = ink("filter: drop-shadow(-30px 0px 2px #ff0000);");
+    assert!(shadow.x0 <= -36.0 && shadow.x1 >= 40.0, "{shadow:?}");
+    let blur = ink("filter: blur(5px);");
+    assert!(blur.x0 <= -15.0 && blur.y1 >= 55.0, "{blur:?}");
 }
 
 #[test]
