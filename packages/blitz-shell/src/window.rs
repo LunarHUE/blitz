@@ -440,22 +440,21 @@ impl<Rend: WindowRenderer> View<Rend> {
         let insets = self.safe_area_insets;
 
         if !is_blocked && is_visible {
-            let started = Instant::now();
-            let mut record = Duration::ZERO;
+            let mut clock = PaintClock::start();
             self.renderer.render(|scene| {
-                let painting = Instant::now();
-                paint_scene(
-                    scene,
-                    &mut inner,
-                    scale,
-                    width,
-                    height,
-                    insets.left,
-                    insets.top,
-                );
-                record = painting.elapsed();
+                clock.record(|| {
+                    paint_scene(
+                        scene,
+                        &mut inner,
+                        scale,
+                        width,
+                        height,
+                        insets.left,
+                        insets.top,
+                    )
+                })
             });
-            inner.finish_frame(record, started.elapsed().saturating_sub(record));
+            clock.finish(&mut inner);
         }
 
         drop(inner);
@@ -897,6 +896,76 @@ fn poll_with_waker(doc: &mut dyn Document, waker: Option<&Waker>) -> bool {
         return false;
     };
     doc.poll(Some(std::task::Context::from_waker(waker)))
+}
+
+/// Times one frame's paint: the recording inside the renderer's drawing
+/// callback, and the rest of the renderer's work around it.
+struct PaintClock {
+    started: Instant,
+    record: Option<Duration>,
+}
+
+impl PaintClock {
+    fn start() -> Self {
+        PaintClock {
+            started: Instant::now(),
+            record: None,
+        }
+    }
+
+    /// Runs the recording, timed.
+    fn record<T>(&mut self, paint: impl FnOnce() -> T) -> T {
+        let painting = Instant::now();
+        let out = paint();
+        self.record = Some(painting.elapsed());
+        out
+    }
+
+    /// Finishes the document's frame with the paint times, if the renderer
+    /// called its drawing callback. A renderer that had nothing to draw
+    /// into, such as softbuffer without a buffer, returns without calling
+    /// it; that frame's work then counts toward the next painted one.
+    fn finish(self, doc: &mut blitz_dom::BaseDocument) {
+        if let Some(record) = self.record {
+            doc.finish_frame(record, self.started.elapsed().saturating_sub(record));
+        }
+    }
+}
+
+#[cfg(test)]
+mod paint_clock_tests {
+    use super::PaintClock;
+    use blitz_dom::{BaseDocument, DocumentConfig};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn observed() -> (BaseDocument, Rc<Cell<usize>>) {
+        let mut doc = BaseDocument::new(DocumentConfig::default());
+        let frames = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&frames);
+        doc.add_frame_observer(Box::new(move |_| seen.set(seen.get() + 1)));
+        (doc, frames)
+    }
+
+    #[test]
+    fn a_frame_the_renderer_drew_is_finished() {
+        let (mut doc, frames) = observed();
+        let mut clock = PaintClock::start();
+        clock.record(|| ());
+        clock.finish(&mut doc);
+        assert_eq!(frames.get(), 1);
+        assert_eq!(doc.frame_timings().frame, 1);
+    }
+
+    #[test]
+    fn a_frame_the_renderer_skipped_stays_open() {
+        // A renderer without a buffer to draw into returns without calling
+        // its drawing callback, so nothing was recorded.
+        let (mut doc, frames) = observed();
+        PaintClock::start().finish(&mut doc);
+        assert_eq!(frames.get(), 0, "no observer hears of an unpainted frame");
+        assert_eq!(doc.frame_timings().frame, 0, "its work waits for the next");
+    }
 }
 
 #[cfg(test)]
