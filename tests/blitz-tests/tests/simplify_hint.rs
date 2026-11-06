@@ -328,3 +328,73 @@ fn changing_the_hint_repaints_without_restyle_or_layout() {
     assert!(clean(&doc), "clearing the hint asked for a restyle");
     assert_eq!(record(&mut doc).1.hinted, 0);
 }
+
+#[test]
+fn text_crossing_its_clip_keeps_its_glyphs() {
+    // A box over a run covers the gaps between its glyphs, so cut by a clip
+    // it can paint where the cut glyphs don't.
+    let (mut hinted, mut plain) = pair(
+        r#"<div HINT style="width: 40px; height: 10px; overflow: hidden">
+            <div style="width: 200px">Words much wider than the clip around them</div>
+        </div>"#,
+        "text=100",
+    );
+    let (_, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 0);
+    assert!(
+        pixels(&mut hinted) == pixels(&mut plain),
+        "the hint changed paint"
+    );
+}
+
+#[test]
+fn text_inside_its_clip_simplifies_inside_it() {
+    let (mut hinted, mut plain) = pair(
+        r#"<div HINT style="width: 120px; height: 30px; overflow: hidden">Short words</div>"#,
+        "text=100",
+    );
+    let (_, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 1);
+    let simplified = ink(&pixels(&mut hinted)).unwrap();
+    assert!(
+        inside(simplified, (0, 0, 119, 29)),
+        "{simplified:?} outside the clip"
+    );
+    let full = ink(&pixels(&mut plain)).unwrap();
+    assert!(inside(simplified, full), "{simplified:?} outside {full:?}");
+}
+
+#[test]
+fn ink_boxes_keep_their_place_in_the_stacking_order() {
+    // An opaque box stacked above the text, and one below it, both in the
+    // hinted element's own stacking context.
+    let (mut hinted, mut plain) = pair(
+        r#"<div HINT style="position: relative; z-index: 0; width: 200px; height: 40px">
+            <div style="position: absolute; left: 0; top: 0; width: 200px; height: 40px;
+                        background: #00ff00; z-index: -1"></div>
+            <div>Words partly covered by a box above them</div>
+            <div style="position: absolute; left: 50px; top: 0; width: 60px; height: 40px;
+                        background: #0000ff; z-index: 1"></div>
+        </div>"#,
+        "text=100",
+    );
+    let (_, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 1);
+    let (a, b) = (pixels(&mut hinted), pixels(&mut plain));
+    let at = |buf: &[u8], x: u32, y: u32| {
+        let i = ((y * W + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2]]
+    };
+    for y in 0..40 {
+        for x in 50..110 {
+            assert_eq!(
+                at(&a, x, y),
+                [0, 0, 255],
+                "the box above is covered at ({x}, {y})"
+            );
+        }
+    }
+    // Where the text isn't, both show the box below.
+    assert_eq!(at(&a, 199, 39), at(&b, 199, 39));
+    assert_eq!(at(&a, 199, 39), [0, 255, 0]);
+}

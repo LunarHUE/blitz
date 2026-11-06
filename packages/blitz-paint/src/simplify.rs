@@ -8,8 +8,10 @@
 //! direction, paints each glyph run as one filled box of its glyphs' outline
 //! bounds, in the run's colour at [`INK_COVERAGE`], instead of its glyphs.
 //! Decorations go with the glyphs; inline backgrounds and selection stay. A
-//! layout with `text-overflow`, a faux-italic run or a glyph whose outline
-//! can't be read keeps its glyphs.
+//! layout with `text-overflow`, a faux-italic run, a glyph whose outline
+//! can't be read, or a box crossing the clip rectangle around it keeps its
+//! glyphs. Clips other than that rectangle, such as `clip-path` or rounded
+//! overflow corners, aren't checked.
 //!
 //! The box lies inside what the glyphs cover: it is the unhinted outlines'
 //! exact bounds, not grown for synthetic bold, and shrunk by half a device
@@ -89,12 +91,18 @@ pub(crate) fn stretch(transform: Affine) -> (f64, f64) {
 
 /// Paints `layout`'s glyph runs as ink boxes if it qualifies, and says
 /// whether it did. `transform` places the layout as `stroke_text` would;
-/// `text` is the threshold in device pixels.
+/// `text` is the threshold in device pixels. Every box must lie inside
+/// `clip`, in the coordinates `screen` maps the layout to: a box spans the
+/// gaps between its glyphs, so a clip through it could leave paint where
+/// the clipped glyphs leave none.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_ink_boxes(
     scene: &mut impl PaintScene,
     layout: &Layout<TextBrush>,
     doc: &BaseDocument,
     transform: Affine,
+    screen: Affine,
+    clip: Rect,
     text: f64,
     boxes: &mut Vec<(Rect, crate::color::Color)>,
 ) -> bool {
@@ -155,6 +163,14 @@ pub(crate) fn draw_ink_boxes(
                 if ink.width() <= 0.0 || ink.height() <= 0.0 {
                     continue;
                 }
+            }
+            let on_screen = screen.transform_rect_bbox(ink);
+            if on_screen.x0 < clip.x0
+                || on_screen.y0 < clip.y0
+                || on_screen.x1 > clip.x1
+                || on_screen.y1 > clip.y1
+            {
+                return false;
             }
             let color = doc
                 .get_node(node_id)

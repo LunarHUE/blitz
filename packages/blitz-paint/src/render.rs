@@ -629,7 +629,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                                 cx.draw_sub_document(scene);
                                 cx.draw_input(scene);
                                 cx.draw_text_input_text(scene, content_position);
-                                cx.draw_inline_layout(scene, content_position);
+                                cx.draw_inline_layout(scene, content_position, child_clip_rect);
                                 cx.draw_marker(scene, content_position);
                                 cx.draw_children(scene, cx.transform, child_clip_rect);
                             },
@@ -918,7 +918,9 @@ impl ElementCx<'_, '_> {
         }
     }
 
-    fn draw_inline_layout(&self, scene: &mut impl PaintScene, pos: Point) {
+    /// `clip` is the clip rectangle around the layout, in screen
+    /// coordinates.
+    fn draw_inline_layout(&self, scene: &mut impl PaintScene, pos: Point, clip: Rect) {
         if self.node.flags.is_inline_root() {
             let text_layout = self.element
                 .inline_layout_data
@@ -981,6 +983,9 @@ impl ElementCx<'_, '_> {
                     &text_layout.layout,
                     self.context.dom,
                     transform,
+                    Affine::translate((-self.context.initial_x, -self.context.initial_y))
+                        * transform,
+                    clip,
                     hint.text,
                     &mut self.context.ink_boxes.borrow_mut(),
                 )
