@@ -232,3 +232,34 @@ fn a_wide_outside_marker_is_painted() {
         ) > 0
     );
 }
+
+/// A font whose `H` rises six ems above its baseline while its metrics
+/// claim an ascent of 0.8 em.
+const TALL: &[u8] = include_bytes!("tall.ttf");
+
+#[test]
+fn a_glyph_taller_than_its_font_says_is_painted() {
+    // A ten pixel line 15px below the viewport; the glyph rises 60px.
+    let body = "<div id='box' style='position:absolute; left:10px; top:115px; width:80px; \
+                font-family:\"Tall Test\"; font-size:10px; line-height:10px;'>H</div>";
+    let count = |body: &str| {
+        let mut ctx = blitz_dom::FontContext::new();
+        ctx.collection
+            .register_fonts(parley::fontique::Blob::new(Arc::new(TALL)), None);
+        let mut doc = HtmlDocument::from_html(
+            &format!("<html><body style='margin:0'>{body}</body></html>"),
+            DocumentConfig {
+                viewport: Some(Viewport::new(SIZE, SIZE, 1.0, ColorScheme::Light)),
+                html_parser_provider: Some(Arc::new(HtmlProvider) as _),
+                font_ctx: Some(ctx),
+                ..Default::default()
+            },
+        );
+        doc.resolve(0.0);
+        let mut scene = anyrender::Scene::new();
+        paint_scene(&mut scene, &mut doc, 1.0, SIZE, SIZE, 0, 0);
+        scene.commands.len()
+    };
+    let hidden = body.replacen("id='box' style='", "id='box' style='display:none; ", 1);
+    assert!(count(body) > count(&hidden));
+}
