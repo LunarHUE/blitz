@@ -1003,7 +1003,6 @@ impl ElementCx<'_, '_> {
                     &text_layout.layout,
                     self.context.dom,
                     transform,
-                    self.scale,
                     hint.text,
                     &mut self.context.ink_boxes.borrow_mut(),
                 )

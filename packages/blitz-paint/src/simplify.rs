@@ -28,7 +28,7 @@ use peniko::Fill;
 use std::collections::HashMap;
 
 use crate::FONT_EMBOLDEN_ENABLED;
-use crate::text::{glyph_style, synthetic_bold};
+use crate::text::synthetic_bold;
 use blitz_dom::util::ToColorColor as _;
 
 /// The attribute that asks for simplified paint of an element and its
@@ -91,7 +91,6 @@ pub(crate) fn draw_ink_boxes(
     layout: &Layout<TextBrush>,
     doc: &BaseDocument,
     transform: Affine,
-    scale: f64,
     text: f64,
     boxes: &mut Vec<(Rect, crate::color::Color)>,
 ) -> bool {
@@ -111,9 +110,11 @@ pub(crate) fn draw_ink_boxes(
             let em = f64::from(font_size) / f64::from(face.units_per_em);
 
             let node_id: NodeId = glyph_run.style().brush.id;
+            // Emboldening only grows the outlines, so their bounds stay
+            // inside the ink; it matters here only because it turns hinting
+            // off.
             let bold = synthetic_bold(doc, node_id, run);
             let hinted = !(FONT_EMBOLDEN_ENABLED || bold.is_some());
-            let embolden = bold.unwrap_or_else(|| glyph_style(font_size, scale).1);
 
             let baseline = f64::from(glyph_run.baseline());
             let mut pen = glyph_run.offset();
@@ -132,8 +133,7 @@ pub(crate) fn draw_ink_boxes(
                     y - f64::from(b[3]) * em,
                     at + f64::from(b[2]) * em,
                     y - f64::from(b[1]) * em,
-                )
-                .inflate(embolden.x, embolden.y);
+                );
                 ink = Some(ink.map_or(r, |i| i.union(r)));
             }
             let Some(mut ink) = ink else {

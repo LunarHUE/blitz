@@ -263,3 +263,25 @@ fn the_hint_ends_with_its_element() {
     assert_eq!(stats.text_boxes, 1);
     assert_eq!(glyph_runs(&commands), 1, "the sibling keeps its glyphs");
 }
+
+#[test]
+fn synthetic_bold_boxes_stay_inside_the_glyphs() {
+    // A static face with no bold, so weight 700 is drawn emboldened.
+    let (mut hinted, mut plain) = pair(
+        r#"<div HINT style="width: 220px; font: 700 14px 'DejaVu Math TeX Gyre'">
+            Bold words drawn by emboldening
+        </div>"#,
+        "text=100",
+    );
+    let (commands, _) = record(&mut plain);
+    assert!(
+        commands.iter().any(|c| matches!(c,
+            RenderCommand::GlyphRun(g) if g.embolden.x > 0.0)),
+        "the run is synthetic bold"
+    );
+    let (_, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 1);
+    let simplified = ink(&pixels(&mut hinted)).unwrap();
+    let full = ink(&pixels(&mut plain)).unwrap();
+    assert!(inside(simplified, full), "{simplified:?} outside {full:?}");
+}
