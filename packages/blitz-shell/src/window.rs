@@ -943,7 +943,10 @@ mod paint_clock_tests {
         let mut doc = BaseDocument::new(DocumentConfig::default());
         let frames = Rc::new(Cell::new(0));
         let seen = Rc::clone(&frames);
-        doc.add_frame_observer(Box::new(move |_| seen.set(seen.get() + 1)));
+        doc.add_frame_observer(Box::new(move |_| {
+            seen.set(seen.get() + 1);
+            true
+        }));
         (doc, frames)
     }
 

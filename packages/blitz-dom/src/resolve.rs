@@ -504,7 +504,10 @@ mod tests {
         let mut doc = document();
         let seen = Rc::new(RefCell::new(Vec::new()));
         let log = Rc::clone(&seen);
-        doc.add_frame_observer(Box::new(move |t| log.borrow_mut().push(*t)));
+        doc.add_frame_observer(Box::new(move |t| {
+            log.borrow_mut().push(*t);
+            true
+        }));
 
         // Input asks for a resolve to hit-test, then the redraw resolves
         // again before painting: both belong to the one painted frame.
@@ -536,6 +539,21 @@ mod tests {
     }
 
     #[test]
+    fn an_observer_that_returns_false_is_dropped_after_that_frame() {
+        let mut doc = document();
+        let calls = Rc::new(RefCell::new(0));
+        let count = Rc::clone(&calls);
+        doc.add_frame_observer(Box::new(move |_| {
+            *count.borrow_mut() += 1;
+            false
+        }));
+        doc.finish_frame(Duration::ZERO, Duration::ZERO);
+        doc.finish_frame(Duration::ZERO, Duration::ZERO);
+        assert_eq!(*calls.borrow(), 1);
+        assert_eq!(Rc::strong_count(&calls), 1, "its captures went with it");
+    }
+
+    #[test]
     fn a_painted_frame_reports_its_work_to_observers_until_removed() {
         let mut doc = document();
         assert_eq!(doc.frame_timings(), Default::default());
@@ -548,7 +566,10 @@ mod tests {
 
         let seen = Rc::new(RefCell::new(Vec::new()));
         let log = Rc::clone(&seen);
-        let id = doc.add_frame_observer(Box::new(move |t| log.borrow_mut().push(*t)));
+        let id = doc.add_frame_observer(Box::new(move |t| {
+            log.borrow_mut().push(*t);
+            true
+        }));
         let done = doc.finish_frame(Duration::from_micros(5), Duration::from_micros(6));
         assert_eq!(done.record, Some(Duration::from_micros(5)));
         assert_eq!(done.render, Some(Duration::from_micros(6)));

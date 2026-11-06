@@ -316,7 +316,7 @@ pub struct BaseDocument {
     pub(crate) last_resolve_time: f64,
     /// The work of the frame being prepared; see [`FrameTimings`].
     pub(crate) frame_timings: FrameTimings,
-    frame_observers: Vec<(usize, Box<dyn FnMut(&FrameTimings)>)>,
+    frame_observers: Vec<(usize, Box<dyn FnMut(&FrameTimings) -> bool>)>,
     next_frame_observer: usize,
     /// Whether resolve ends by re-resolving hover from the last pointer
     /// position. Off only for a resolve input asks for when that input
@@ -2272,14 +2272,16 @@ impl BaseDocument {
             frame: done.frame + 1,
             ..FrameTimings::default()
         };
-        for (_, observer) in &mut self.frame_observers {
-            observer(&done);
-        }
+        self.frame_observers
+            .retain_mut(|(_, observer)| observer(&done));
         done
     }
 
-    /// Runs `observer` at the end of every painted frame, until removed.
-    pub fn add_frame_observer(&mut self, observer: Box<dyn FnMut(&FrameTimings)>) -> usize {
+    /// Runs `observer` at the end of every painted frame, until it returns
+    /// false or is removed. Returning false lets an observer stop itself
+    /// when its owner couldn't remove it, such as while the document was
+    /// borrowed.
+    pub fn add_frame_observer(&mut self, observer: Box<dyn FnMut(&FrameTimings) -> bool>) -> usize {
         self.next_frame_observer += 1;
         let id = self.next_frame_observer;
         self.frame_observers.push((id, observer));
