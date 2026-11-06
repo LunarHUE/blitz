@@ -303,3 +303,28 @@ fn small_frames_keep_descendant_shadows_and_outlines() {
         "the hint changed paint"
     );
 }
+
+fn simplify_attr() -> blitz_dom::QualName {
+    blitz_dom::QualName::new(None, blitz_dom::ns!(), blitz_paint::SIMPLIFY_ATTR.into())
+}
+
+#[test]
+fn changing_the_hint_repaints_without_restyle_or_layout() {
+    let mut doc = doc(r#"<div id="t" style="width: 200px">Small words</div>"#);
+    let id = doc.get_element_by_id("t").unwrap();
+    let root = doc.root_node().id;
+    let clean = |doc: &HtmlDocument| !doc.get_node(root).unwrap().has_dirty_descendants();
+    assert!(clean(&doc));
+
+    doc.mutate().set_attribute(id, simplify_attr(), "text=100");
+    assert!(clean(&doc), "setting the hint asked for a restyle");
+    assert_eq!(record(&mut doc).1.text_boxes, 1, "paint reads the new hint");
+
+    doc.mutate().set_attribute(id, simplify_attr(), "text=1");
+    assert!(clean(&doc));
+    assert_eq!(record(&mut doc).1.text_boxes, 0);
+
+    doc.mutate().clear_attribute(id, simplify_attr());
+    assert!(clean(&doc), "clearing the hint asked for a restyle");
+    assert_eq!(record(&mut doc).1.hinted, 0);
+}

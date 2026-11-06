@@ -31,6 +31,12 @@
 pub const DEFAULT_CSS: &str = include_str!("../assets/default.css");
 pub const BULLET_FONT: &[u8] = include_bytes!("../assets/moz-bullet-font.otf");
 
+/// The attribute that asks blitz-paint to paint an element simplified. It is
+/// paint-only: style, layout and hit testing never read it, so setting or
+/// clearing it only requests a redraw. Selectors that match on it are not
+/// re-evaluated when it changes.
+pub const SIMPLIFY_ATTR: &str = "data-blitz-simplify";
+
 /// The DOM implementation.
 ///
 /// This is the primary entry point for this crate.

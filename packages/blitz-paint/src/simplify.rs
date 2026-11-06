@@ -35,8 +35,8 @@ use blitz_dom::util::ToColorColor as _;
 /// The attribute that asks for simplified paint of an element and its
 /// descendants, as space-separated `key=value` pairs: `text=<px>`, in device
 /// pixels. A missing or unparsable pair turns the substitution off, and
-/// other keys are ignored.
-pub const SIMPLIFY_ATTR: &str = "data-blitz-simplify";
+/// other keys are ignored. Setting or clearing it only requests a redraw.
+pub use blitz_dom::SIMPLIFY_ATTR;
 
 /// How much of a run's ink box the replacement covers: the share of the box
 /// glyphs of body text cover, roughly, so the box reads at its weight.
@@ -56,9 +56,8 @@ impl Simplify {
                 continue;
             };
             let v = v.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0);
-            match key {
-                "text" => out.text = v.unwrap_or(0.0),
-                _ => {}
+            if key == "text" {
+                out.text = v.unwrap_or(0.0);
             }
         }
         out
@@ -110,7 +109,7 @@ pub(crate) fn draw_ink_boxes(
             let font_size = run.font_size();
             // NaN from a degenerate transform fails the comparison too.
             let projected = f64::from(font_size) * most;
-            if !(projected < text) || run.synthesis().skew().is_some() {
+            if projected.is_nan() || projected >= text || run.synthesis().skew().is_some() {
                 return false;
             }
             let face = Face::of(run);
