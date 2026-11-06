@@ -920,6 +920,13 @@ impl PaintClock {
     /// called its drawing callback. A renderer that had nothing to draw
     /// into, such as softbuffer without a buffer, returns without calling
     /// it; that frame's work then counts toward the next painted one.
+    ///
+    /// The callback running is the only sign of success the shell gets:
+    /// anyrender's `WindowRenderer::render` returns nothing. Softbuffer
+    /// acquires its buffer before drawing and panics if presenting fails,
+    /// so with it a drawn frame was presented. A GPU renderer that draws
+    /// first and then fails to acquire or present its surface returns the
+    /// same way, and that frame is still reported as painted.
     fn finish(self, doc: &mut blitz_dom::BaseDocument) {
         if let Some(record) = self.record {
             doc.finish_frame(record, self.started.elapsed().saturating_sub(record));

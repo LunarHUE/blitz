@@ -3047,7 +3047,8 @@ pub struct FrameTimings {
     /// reported it.
     pub record: Option<Duration>,
     /// What the renderer did with the scene after recording, as the shell
-    /// reported it.
+    /// reported it. A frame the renderer drew but then failed to present
+    /// is reported like any other; the renderer API doesn't say.
     pub render: Option<Duration>,
 }
 
