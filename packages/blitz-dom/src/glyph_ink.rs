@@ -172,3 +172,35 @@ impl skrifa::outline::OutlinePen for PathPen {
         self.0.close_path();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caches_stay_bounded_as_fonts_come_and_go() {
+        // Faces from fonts and documents long gone.
+        for blob in 0..3 * UPEM_CACHE_LIMIT as u64 {
+            let upem = 1000 + (blob % 7) as u16;
+            assert_eq!(units_per_em((blob, 0), || upem), upem);
+            assert!(UPEM_CACHE.with(|c| c.borrow().len()) <= UPEM_CACHE_LIMIT);
+        }
+        // A face still cached is read from the cache.
+        let last = (3 * UPEM_CACHE_LIMIT as u64 - 1, 0);
+        assert_eq!(
+            units_per_em(last, || unreachable!()),
+            1000 + (last.0 % 7) as u16
+        );
+
+        let mut glyphs = HashMap::new();
+        for glyph in 0..3 * INK_CACHE_LIMIT as u32 {
+            bounded_insert(
+                &mut glyphs,
+                INK_CACHE_LIMIT,
+                ((1, 0, 0), glyph),
+                GlyphInk::Empty,
+            );
+            assert!(glyphs.len() <= INK_CACHE_LIMIT);
+        }
+    }
+}
