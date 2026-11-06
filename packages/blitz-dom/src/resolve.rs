@@ -22,7 +22,7 @@ thread_local! {
 use taffy::AvailableSpace;
 
 use crate::{
-    BaseDocument, FrameTimings,
+    BaseDocument,
     layout::{
         LayoutPassState,
         construct::{
@@ -127,14 +127,10 @@ impl BaseDocument {
         self.build_paint_tree(root_node_id);
         timer.record_time("paint_tree");
         self.layout_stale = false;
-        self.frame_timings = FrameTimings {
-            frame: self.frame_timings.frame + 1,
-            diff: self.pending_diff.take(),
-            style: styled - started,
-            layout: styled.elapsed(),
-            record: None,
-            render: None,
-        };
+        let frame = &mut self.frame_timings;
+        frame.resolves += 1;
+        frame.style += styled - started;
+        frame.layout += styled.elapsed();
 
         // Clear all damage and dirty flags, walking only subtrees which are
         // marked as (potentially) containing damage.
@@ -504,40 +500,63 @@ mod tests {
     }
 
     #[test]
-    fn each_resolve_starts_a_frame_with_its_own_timings() {
+    fn resolves_before_one_painted_frame_add_up_in_it() {
         let mut doc = document();
-        assert_eq!(doc.frame_timings().frame, 0);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&seen);
+        doc.add_frame_observer(Box::new(move |t| log.borrow_mut().push(*t)));
 
+        // Input asks for a resolve to hit-test, then the redraw resolves
+        // again before painting: both belong to the one painted frame.
         doc.add_diff_timing(Duration::from_micros(3));
-        doc.add_diff_timing(Duration::from_micros(4));
         doc.resolve(0.0);
         let first = doc.frame_timings();
-        assert_eq!(first.frame, 1);
-        assert_eq!(first.diff, Some(Duration::from_micros(7)), "reports add up");
-        assert!(first.style > Duration::ZERO && first.layout > Duration::ZERO);
-        assert_eq!((first.record, first.render), (None, None));
+        doc.add_diff_timing(Duration::from_micros(4));
+        doc.resolve(0.0);
+        let both = doc.frame_timings();
+        assert_eq!(
+            both.diff,
+            Some(Duration::from_micros(7)),
+            "neither diff lost"
+        );
+        assert!(both.style > first.style && both.layout > first.layout);
+        assert_eq!(both.resolves, 2);
+
+        doc.finish_frame(Duration::from_micros(5), Duration::from_micros(6));
+        let reported = seen.borrow()[0];
+        assert_eq!(reported.diff, Some(Duration::from_micros(7)));
+        assert_eq!((reported.style, reported.layout), (both.style, both.layout));
+        assert_eq!(reported.resolves, 2);
+
+        // The next frame starts empty.
+        let next = doc.frame_timings();
+        assert_eq!(next.frame, reported.frame + 1);
+        assert_eq!((next.diff, next.resolves), (None, 0));
+        assert_eq!((next.style, next.layout), (Duration::ZERO, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_painted_frame_reports_its_work_to_observers_until_removed() {
+        let mut doc = document();
+        assert_eq!(doc.frame_timings(), Default::default());
+
+        doc.add_diff_timing(Duration::from_micros(3));
+        doc.resolve(0.0);
+        let open = doc.frame_timings();
+        assert!(open.style > Duration::ZERO && open.layout > Duration::ZERO);
+        assert_eq!((open.record, open.render), (None, None), "not painted yet");
 
         let seen = Rc::new(RefCell::new(Vec::new()));
         let log = Rc::clone(&seen);
         let id = doc.add_frame_observer(Box::new(move |t| log.borrow_mut().push(*t)));
-        doc.finish_frame(Duration::from_micros(5), Duration::from_micros(6));
-        let painted = doc.frame_timings();
-        assert_eq!(painted.record, Some(Duration::from_micros(5)));
-        assert_eq!(painted.render, Some(Duration::from_micros(6)));
-        assert_eq!(
-            *seen.borrow(),
-            [painted],
-            "observers see the finished frame"
-        );
-
-        doc.resolve(0.0);
-        let second = doc.frame_timings();
-        assert_eq!(second.frame, 2);
-        assert_eq!(second.diff, None, "the diff belonged to the first frame");
-        assert_eq!((second.record, second.render), (None, None));
-        assert_eq!(seen.borrow().len(), 1, "a resolve alone finishes no frame");
+        let done = doc.finish_frame(Duration::from_micros(5), Duration::from_micros(6));
+        assert_eq!(done.record, Some(Duration::from_micros(5)));
+        assert_eq!(done.render, Some(Duration::from_micros(6)));
+        assert_eq!((done.diff, done.style), (open.diff, open.style));
+        assert_eq!(*seen.borrow(), [done], "observers see the finished frame");
 
         doc.remove_frame_observer(id);
+        doc.resolve(0.0);
         doc.finish_frame(Duration::ZERO, Duration::ZERO);
         assert_eq!(seen.borrow().len(), 1, "removed");
     }
