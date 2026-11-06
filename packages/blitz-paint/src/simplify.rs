@@ -4,9 +4,11 @@
 //! those of the full document.
 //!
 //! Under a hinted element, an inline layout whose every run projects below
-//! `text` device pixels of font size, along the transform's most stretched
-//! direction, paints each glyph run as one filled box of its glyphs' outline
-//! bounds, in the run's colour at [`INK_COVERAGE`], instead of its glyphs.
+//! `text` device pixels of font size, under a transform that only scales
+//! and translates, paints each glyph run as one filled box of its glyphs'
+//! outline bounds, in the run's colour at [`INK_COVERAGE`], instead of its
+//! glyphs. A rotated or skewed run keeps its glyphs: its box would reach
+//! past the turned glyphs' extrema.
 //! Decorations go with the glyphs; inline backgrounds and selection stay. A
 //! layout with `text-overflow`, a faux-italic run, a glyph whose outline
 //! can't be read, or a box crossing the clip rectangle around it keeps its
@@ -75,6 +77,15 @@ pub struct PaintStats {
     pub text_boxes: u32,
 }
 
+/// Whether `transform` keeps a rectangle a rectangle with the same edges:
+/// scales and translations only, mirrors included. A rotated or skewed
+/// box reaches past the extrema of the glyphs inside it.
+pub(crate) fn axis_aligned(transform: Affine) -> bool {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    let tolerance = 1e-9 * (a.abs() + d.abs()).max(f64::MIN_POSITIVE);
+    b.abs() <= tolerance && c.abs() <= tolerance
+}
+
 /// The least and most a unit length is stretched by `transform`'s linear
 /// part, over every direction: its singular values. Skew and unequal axis
 /// scales give different values; a rotation or uniform scale the same.
@@ -107,6 +118,9 @@ pub(crate) fn draw_ink_boxes(
     boxes: &mut Vec<(Rect, crate::color::Color)>,
 ) -> bool {
     boxes.clear();
+    if !axis_aligned(transform) {
+        return false;
+    }
     let (least, most) = stretch(transform);
     for line in layout.lines() {
         for item in line.items() {
@@ -189,6 +203,15 @@ pub(crate) fn draw_ink_boxes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_scales_and_translations_are_axis_aligned() {
+        assert!(axis_aligned(Affine::IDENTITY));
+        assert!(axis_aligned(Affine::scale_non_uniform(10.0, 0.1)));
+        assert!(axis_aligned(Affine::translate((5.0, 7.0)) * Affine::FLIP_X));
+        assert!(!axis_aligned(Affine::rotate(0.01)));
+        assert!(!axis_aligned(Affine::skew(0.2, 0.0)));
+    }
 
     #[test]
     fn stretch_is_the_least_and_most_scale_over_directions() {

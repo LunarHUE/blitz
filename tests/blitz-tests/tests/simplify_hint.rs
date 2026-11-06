@@ -398,3 +398,13 @@ fn ink_boxes_keep_their_place_in_the_stacking_order() {
     assert_eq!(at(&a, 199, 39), at(&b, 199, 39));
     assert_eq!(at(&a, 199, 39), [0, 255, 0]);
 }
+
+#[test]
+fn rotated_text_keeps_its_glyphs() {
+    // A box rotated with its run reaches past the rotated glyphs' extrema,
+    // as a round letter's corners would.
+    let (mut hinted, _) = stretched("translate(80px, 10px) rotate(45deg) scale(0.5)");
+    let (commands, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 0);
+    assert!(glyph_runs(&commands) > 0);
+}
