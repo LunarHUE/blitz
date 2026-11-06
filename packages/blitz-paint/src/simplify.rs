@@ -1,23 +1,24 @@
-//! Simplified paint for small projected features, asked for per element with
+//! Simplified paint for small projected text, asked for per element with
 //! the [`SIMPLIFY_ATTR`] attribute. It changes only what is painted: style,
 //! layout and hit testing never read the attribute, so boxes and picking stay
 //! those of the full document.
 //!
-//! Under a hinted element, two substitutions apply:
+//! Under a hinted element, an inline layout whose every run projects below
+//! `text` device pixels of font size, along the transform's most stretched
+//! direction, paints each glyph run as one filled box of its glyphs' outline
+//! bounds, in the run's colour at [`INK_COVERAGE`], instead of its glyphs.
+//! Decorations go with the glyphs; inline backgrounds and selection stay. A
+//! layout with `text-overflow`, a faux-italic run or a glyph whose outline
+//! can't be read keeps its glyphs.
 //!
-//! - An inline layout whose every run projects below `text` device pixels of
-//!   font size paints each glyph run as one filled box of its glyphs' ink
-//!   bounds, in the run's colour at [`INK_COVERAGE`], instead of its glyphs.
-//!   Decorations go with the glyphs; inline backgrounds and selection stay.
-//!   A layout with `text-overflow`, a faux-italic run or a glyph without
-//!   outline bounds keeps its glyphs.
-//! - A descendant element whose border box projects below `frame` device
-//!   pixels on both sides, and whose children are laid out inside it, paints
-//!   its own background, border, shadows and outline and none of its content.
+//! The box lies inside what the glyphs cover: it is the unhinted outlines'
+//! exact bounds, not grown for synthetic bold, and shrunk by half a device
+//! pixel where hinting may pull an edge in. Out-of-flow descendants that a
+//! stacking context outside the hinted element paints are drawn in full.
 //!
-//! Both only remove or replace paint with paint inside what the glyphs or
-//! the element would have covered. Out-of-flow descendants that a stacking
-//! context outside the hinted element paints are drawn in full.
+//! Nothing else is substituted. Dropping a small element's content would
+//! need its descendants' painted bounds, shadows and outlines included,
+//! which layout's scrollable overflow doesn't give.
 
 use anyrender::PaintScene;
 use blitz_dom::node::TextBrush;
@@ -32,20 +33,19 @@ use crate::text::synthetic_bold;
 use blitz_dom::util::ToColorColor as _;
 
 /// The attribute that asks for simplified paint of an element and its
-/// descendants, as space-separated `key=value` pairs: `text=<px>` and
-/// `frame=<px>`, both in device pixels. A missing or unparsable pair turns
-/// that substitution off.
+/// descendants, as space-separated `key=value` pairs: `text=<px>`, in device
+/// pixels. A missing or unparsable pair turns the substitution off, and
+/// other keys are ignored.
 pub const SIMPLIFY_ATTR: &str = "data-blitz-simplify";
 
 /// How much of a run's ink box the replacement covers: the share of the box
 /// glyphs of body text cover, roughly, so the box reads at its weight.
 pub const INK_COVERAGE: f32 = 0.4;
 
-/// The thresholds a hint sets. Zero turns a substitution off.
+/// The threshold a hint sets. Zero turns the substitution off.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct Simplify {
     pub(crate) text: f64,
-    pub(crate) frame: f64,
 }
 
 impl Simplify {
@@ -58,7 +58,6 @@ impl Simplify {
             let v = v.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0);
             match key {
                 "text" => out.text = v.unwrap_or(0.0),
-                "frame" => out.frame = v.unwrap_or(0.0),
                 _ => {}
             }
         }
@@ -73,8 +72,6 @@ pub struct PaintStats {
     pub hinted: u32,
     /// Inline layouts painted as ink boxes.
     pub text_boxes: u32,
-    /// Elements painted without their content.
-    pub flattened: u32,
 }
 
 /// The least and most a unit length is stretched by `transform`'s linear
@@ -336,21 +333,13 @@ mod tests {
 
     #[test]
     fn parses_known_pairs_and_ignores_the_rest() {
+        assert_eq!(Simplify::parse("text=6"), Simplify { text: 6.0 });
         assert_eq!(
-            Simplify::parse("text=6 frame=2.5"),
-            Simplify {
-                text: 6.0,
-                frame: 2.5
-            }
+            Simplify::parse("frame=3 text=2.5 junk"),
+            Simplify { text: 2.5 }
         );
-        assert_eq!(
-            Simplify::parse("frame=3 depth=9 junk"),
-            Simplify {
-                text: 0.0,
-                frame: 3.0
-            }
-        );
-        assert_eq!(Simplify::parse("text=-1 frame=NaN"), Simplify::default());
+        assert_eq!(Simplify::parse("text=-1"), Simplify::default());
+        assert_eq!(Simplify::parse("text=NaN"), Simplify::default());
         assert_eq!(Simplify::parse(""), Simplify::default());
     }
 }

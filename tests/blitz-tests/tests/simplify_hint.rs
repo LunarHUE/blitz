@@ -1,6 +1,6 @@
-//! `data-blitz-simplify`: small text paints as ink boxes and small nested
-//! frames paint only their own box, without moving a layout box or changing
-//! what a point hits, and without painting outside what full paint covers.
+//! `data-blitz-simplify`: small text paints as ink boxes, without moving a
+//! layout box or changing what a point hits, and without painting outside
+//! what full paint covers. Nothing else changes.
 
 use anyrender::recording::RenderCommand;
 use anyrender::render_to_buffer;
@@ -190,66 +190,23 @@ fn text_overflow_keeps_its_glyphs() {
     assert_eq!(stats.text_boxes, 0);
 }
 
-fn fills_of(commands: &[RenderCommand], rgb: [u8; 3]) -> usize {
-    commands
-        .iter()
-        .filter(|c| match c {
-            RenderCommand::Fill(f) => match &f.brush {
-                anyrender::Paint::Solid(color) => {
-                    let c = color.to_rgba8();
-                    [c.r, c.g, c.b] == rgb
-                }
-                _ => false,
-            },
-            _ => false,
-        })
-        .count()
-}
-
-const NESTED: &str = r#"<div HINT style="width: 100px; height: 50px">
-    <div style="width: 3px; height: 3px; background: #ff0000">
-        <div style="width: 1px; height: 1px; background: #00ff00"></div>
-    </div>
-    <div style="width: 3px; height: 3px; background: #0000ff">
-        <div style="width: 10px; height: 1px; background: #ffff00"></div>
-    </div>
-</div>"#;
-
 #[test]
-fn a_small_nested_frame_paints_only_its_own_box() {
-    let (mut hinted, mut plain) = pair(NESTED, "frame=4");
-    let (commands, stats) = record(&mut hinted);
-    assert_eq!(fills_of(&commands, [255, 0, 0]), 1, "its own background");
-    assert_eq!(fills_of(&commands, [0, 255, 0]), 0, "not its child");
-    // A child laid out past the frame's box keeps the frame whole.
-    assert_eq!(fills_of(&commands, [0, 0, 255]), 1);
-    assert_eq!(fills_of(&commands, [255, 255, 0]), 1);
-    assert_eq!(stats.flattened, 1);
-
-    let simplified = ink(&pixels(&mut hinted)).unwrap();
-    let full = ink(&pixels(&mut plain)).unwrap();
-    assert!(inside(simplified, full), "{simplified:?} outside {full:?}");
-}
-
-#[test]
-fn frames_at_or_above_the_threshold_keep_their_content() {
-    let (mut hinted, _) = pair(NESTED, "frame=3");
-    let (commands, stats) = record(&mut hinted);
-    assert_eq!(fills_of(&commands, [0, 255, 0]), 1);
-    assert_eq!(stats.flattened, 0);
-}
-
-#[test]
-fn the_hinted_element_itself_is_never_flattened() {
-    let (mut hinted, _) = pair(
-        r#"<div HINT style="width: 3px; height: 3px; background: #ff0000">
-            <div style="width: 1px; height: 1px; background: #00ff00"></div>
+fn small_nested_frames_keep_their_content() {
+    // A frame key from an older hint substitutes nothing.
+    let (mut hinted, mut plain) = pair(
+        r#"<div HINT style="width: 100px; height: 50px">
+            <div style="width: 3px; height: 3px; background: #ff0000">
+                <div style="width: 1px; height: 1px; background: #00ff00"></div>
+            </div>
         </div>"#,
         "frame=100",
     );
-    let (commands, stats) = record(&mut hinted);
-    assert_eq!(fills_of(&commands, [0, 255, 0]), 1);
-    assert_eq!(stats.flattened, 0);
+    let (_, stats) = record(&mut hinted);
+    assert_eq!(stats.hinted, 1);
+    assert!(
+        pixels(&mut hinted) == pixels(&mut plain),
+        "the hint changed paint"
+    );
 }
 
 #[test]
@@ -324,4 +281,25 @@ fn text_small_along_both_axes_still_simplifies() {
     let simplified = ink(&pixels(&mut hinted)).unwrap();
     let full = ink(&pixels(&mut plain)).unwrap();
     assert!(inside(simplified, full), "{simplified:?} outside {full:?}");
+}
+
+#[test]
+fn small_frames_keep_descendant_shadows_and_outlines() {
+    // Each frame is 3px with a 1px child, so layout overflow stays inside
+    // it, but the child's shadow and outline paint far outside.
+    let (mut hinted, mut plain) = pair(
+        r#"<div HINT style="width: 200px; height: 100px; padding: 30px">
+            <div style="width: 3px; height: 3px; background: #0000ff">
+                <div style="width: 1px; height: 1px; box-shadow: 0 0 0 20px #ff0000"></div>
+            </div>
+            <div style="width: 3px; height: 3px; margin-top: 40px; background: #0000ff">
+                <div style="width: 1px; height: 1px; outline: 10px solid #00ff00"></div>
+            </div>
+        </div>"#,
+        "text=100 frame=4",
+    );
+    assert!(
+        pixels(&mut hinted) == pixels(&mut plain),
+        "the hint changed paint"
+    );
 }

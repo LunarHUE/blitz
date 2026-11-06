@@ -483,25 +483,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         if hinted {
             self.count(|s| s.hinted += 1);
         }
-        // A small descendant of a hinted element, with its children laid out
-        // inside it, paints only its own box.
-        let flatten = !hinted
-            && !node.children.is_empty()
-            && self.simplify.get().is_some_and(|hint| {
-                let k = crate::simplify::stretch(transform).1;
-                let (w, h) = (box_size.width * self.scale, box_size.height * self.scale);
-                hint.frame > 0.0
-                    && w * k < hint.frame
-                    && h * k < hint.frame
-                    && overflow.x0 >= 0.0
-                    && overflow.y0 >= 0.0
-                    && overflow.x1 <= w
-                    && overflow.y1 <= h
-            });
-        if flatten {
-            self.count(|s| s.flattened += 1);
-        }
-
         #[cfg(feature = "custom-widget")]
         let custom_widget_scene = self.custom_widget_scenes.get(&(self.dom.id(), node_id));
         #[cfg(not(feature = "custom-widget"))]
@@ -630,9 +611,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             None,
                             None,
                             |scene| {
-                                if flatten {
-                                    return;
-                                }
                                 // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
                                 let content_position = Point {
                                     x: content_position.x - node.scroll_offset().x,
