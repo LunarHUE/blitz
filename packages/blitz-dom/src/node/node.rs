@@ -294,6 +294,14 @@ impl Node {
         &mut self.layout_data_mut().scrollable_overflow
     }
 
+    /// A conservative bound on everything this node and its descendants
+    /// paint, including shadows, outlines and filters, in the coordinates
+    /// of [`Self::scrollable_overflow`]. Paint culls against it.
+    #[inline]
+    pub fn ink_overflow(&self) -> &KurboRect {
+        &self.layout_data().ink_overflow
+    }
+
     /// Style data from stylo, if this node kind carries it (element or document
     /// nodes). Returns `None` for text/comment nodes.
     #[inline]

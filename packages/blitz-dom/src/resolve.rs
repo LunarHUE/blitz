@@ -179,18 +179,18 @@ impl BaseDocument {
         timer.print_times(&format!("Resolve({}): ", self.id()));
     }
 
-    fn resolve_transforms(&mut self, node_id: NodeId) -> Rect {
+    /// Recomputes the scrollable and ink overflow of damaged nodes, and
+    /// returns both, transformed into the parent's coordinates.
+    fn resolve_transforms(&mut self, node_id: NodeId) -> (Rect, Rect) {
         if !self.nodes.contains_key(node_id) {
-            return Rect::ZERO;
+            return (Rect::ZERO, Rect::ZERO);
         }
 
         let scale = self.viewport.scale_f64();
 
-        if !self.nodes[node_id]
-            .damage()
-            .map(|d| d.contains(style::selector_parser::RestyleDamage::RECALCULATE_OVERFLOW))
-            .unwrap_or(false)
-        {
+        // Any damage can change ink: outline and filter changes carry only
+        // repaint damage, not overflow damage.
+        if self.nodes[node_id].damage().is_none_or(|d| d.is_empty()) {
             let node = &self.nodes[node_id];
             let location = node.final_layout().location.map(|v| v as f64 * scale);
 
@@ -199,8 +199,10 @@ impl BaseDocument {
                 transform *= *t
             }
 
-            let overflow = *node.scrollable_overflow();
-            return transform.transform_rect_bbox(overflow);
+            return (
+                transform.transform_rect_bbox(*node.scrollable_overflow()),
+                transform.transform_rect_bbox(*node.ink_overflow()),
+            );
         }
 
         let transform = self.nodes[node_id].set_transform(scale as f32);
@@ -208,6 +210,13 @@ impl BaseDocument {
         let w = self.nodes[node_id].final_layout().size.width as f64 * scale;
         let h = self.nodes[node_id].final_layout().size.height as f64 * scale;
         let mut overflow = Rect::new(0.0, 0.0, w, h);
+        let mut ink = match self.nodes[node_id].primary_styles() {
+            Some(style) => crate::layout::ink::own_ink(&style, overflow, scale),
+            None => overflow,
+        };
+        if let Some(text) = crate::layout::ink::text_ink(self, node_id, scale) {
+            ink = ink.union(text);
+        }
 
         let layout_children = std::mem::take(self.nodes[node_id].layout_children.get_mut());
 
@@ -219,8 +228,9 @@ impl BaseDocument {
                 if self.nodes[child_id].is_out_of_flow() {
                     continue;
                 }
-                let child_rect_in_self = self.resolve_transforms(child_id);
-                overflow = overflow.union(child_rect_in_self);
+                let (child_overflow, child_ink) = self.resolve_transforms(child_id);
+                overflow = overflow.union(child_overflow);
+                ink = ink.union(child_ink);
             }
         }
         let hoisted_children =
@@ -229,8 +239,9 @@ impl BaseDocument {
             if !self.nodes.contains_key(child_id) {
                 continue;
             }
-            let child_rect_in_self = self.resolve_transforms(child_id);
-            overflow = overflow.union(child_rect_in_self);
+            let (child_overflow, child_ink) = self.resolve_transforms(child_id);
+            overflow = overflow.union(child_overflow);
+            ink = ink.union(child_ink);
         }
         *self.nodes[node_id].hoisted_children.borrow_mut() = hoisted_children;
         for pseudo in [self.nodes[node_id].before(), self.nodes[node_id].after()] {
@@ -238,11 +249,18 @@ impl BaseDocument {
             if self.nodes[pseudo].is_out_of_flow() {
                 continue;
             }
-            let child_rect_in_self = self.resolve_transforms(pseudo);
-            overflow = overflow.union(child_rect_in_self);
+            let (child_overflow, child_ink) = self.resolve_transforms(pseudo);
+            overflow = overflow.union(child_overflow);
+            ink = ink.union(child_ink);
         }
 
+        if let Some(style) = self.nodes[node_id].primary_styles() {
+            ink = crate::layout::ink::filtered(&style, ink, scale);
+        }
+        let ink = ink.union(overflow);
+
         *self.nodes[node_id].scrollable_overflow_mut() = overflow;
+        self.nodes[node_id].layout_data_mut().ink_overflow = ink;
         *self.nodes[node_id].layout_children.get_mut() = layout_children;
 
         let scaled_x = self.nodes[node_id].final_layout().location.x as f64 * scale;
@@ -254,7 +272,10 @@ impl BaseDocument {
             Affine::translate((scaled_x, scaled_y))
         };
 
-        full.transform_rect_bbox(overflow)
+        (
+            full.transform_rect_bbox(overflow),
+            full.transform_rect_bbox(ink),
+        )
     }
 
     /// Ensure that the layout_children field is populated for all nodes
