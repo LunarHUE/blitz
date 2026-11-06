@@ -186,15 +186,42 @@ enum Ink {
 type FaceKey = (u64, u32, u64);
 
 /// Ink of every glyph seen, kept across paints so a zoom reads it from
-/// here rather than from the font. Cleared whole when it grows past
-/// [`INK_CACHE_LIMIT`] glyphs.
+/// here rather than from the font, up to this many glyphs.
 const INK_CACHE_LIMIT: usize = 1 << 16;
+
+/// Units per em of every face seen, up to this many faces.
+const UPEM_CACHE_LIMIT: usize = 1 << 10;
+
+/// Inserts into a cache of at most `limit` entries, emptying it first when
+/// full. Fonts and documents come and go, so both caches drop everything
+/// rather than track what is still in use.
+fn bounded_insert<K: std::hash::Hash + Eq, V>(
+    cache: &mut HashMap<K, V>,
+    limit: usize,
+    key: K,
+    value: V,
+) {
+    if cache.len() >= limit && !cache.contains_key(&key) {
+        cache.clear();
+    }
+    cache.insert(key, value);
+}
 
 thread_local! {
     static INK_CACHE: std::cell::RefCell<HashMap<(FaceKey, u32), Ink>> =
         std::cell::RefCell::new(HashMap::new());
     static UPEM_CACHE: std::cell::RefCell<HashMap<(u64, u32), u16>> =
         std::cell::RefCell::new(HashMap::new());
+}
+
+/// The units per em of the face `id`, read with `read` when not cached.
+fn units_per_em(id: (u64, u32), read: impl FnOnce() -> u16) -> u16 {
+    if let Some(upem) = UPEM_CACHE.with(|c| c.borrow().get(&id).copied()) {
+        return upem;
+    }
+    let upem = read();
+    UPEM_CACHE.with(|c| bounded_insert(&mut c.borrow_mut(), UPEM_CACHE_LIMIT, id, upem));
+    upem
 }
 
 /// A run's face, read from the font only for glyphs not yet cached.
@@ -214,14 +241,12 @@ impl<'a> Face<'a> {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         coords.hash(&mut h);
         let id = (font.data.id(), font.index);
-        let units_per_em = UPEM_CACHE.with(|c| {
-            *c.borrow_mut().entry(id).or_insert_with(|| {
-                use skrifa::raw::TableProvider as _;
-                skrifa::FontRef::from_index(font.data.as_ref(), font.index)
-                    .ok()
-                    .and_then(|f| f.head().ok())
-                    .map_or(0, |head| head.units_per_em())
-            })
+        let units_per_em = units_per_em(id, || {
+            use skrifa::raw::TableProvider as _;
+            skrifa::FontRef::from_index(font.data.as_ref(), font.index)
+                .ok()
+                .and_then(|f| f.head().ok())
+                .map_or(0, |head| head.units_per_em())
         });
         Face {
             key: (id.0, id.1, h.finish()),
@@ -241,13 +266,7 @@ impl<'a> Face<'a> {
             return ink;
         }
         let ink = self.read(glyph);
-        INK_CACHE.with(|c| {
-            let mut c = c.borrow_mut();
-            if c.len() >= INK_CACHE_LIMIT {
-                c.clear();
-            }
-            c.insert(key, ink);
-        });
+        INK_CACHE.with(|c| bounded_insert(&mut c.borrow_mut(), INK_CACHE_LIMIT, key, ink));
         ink
     }
 
@@ -313,6 +332,30 @@ impl skrifa::outline::OutlinePen for PathPen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caches_stay_bounded_as_fonts_come_and_go() {
+        // Faces from fonts and documents long gone.
+        for blob in 0..3 * UPEM_CACHE_LIMIT as u64 {
+            assert_eq!(
+                units_per_em((blob, 0), || 1000 + (blob % 7) as u16),
+                1000 + (blob % 7) as u16
+            );
+            assert!(UPEM_CACHE.with(|c| c.borrow().len()) <= UPEM_CACHE_LIMIT);
+        }
+        // A face still cached is read from the cache.
+        let last = (3 * UPEM_CACHE_LIMIT as u64 - 1, 0);
+        assert_eq!(
+            units_per_em(last, || unreachable!()),
+            1000 + (last.0 % 7) as u16
+        );
+
+        let mut glyphs = HashMap::new();
+        for glyph in 0..3 * INK_CACHE_LIMIT as u32 {
+            bounded_insert(&mut glyphs, INK_CACHE_LIMIT, ((1, 0, 0), glyph), Ink::Empty);
+            assert!(glyphs.len() <= INK_CACHE_LIMIT);
+        }
+    }
 
     #[test]
     fn stretch_is_the_least_and_most_scale_over_directions() {
