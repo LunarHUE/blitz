@@ -432,8 +432,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             height: (size.height as f64 - scaled_pb.top - scaled_pb.bottom) * self.scale,
         };
 
-        // Don't render things that are out of view
-        let overflow = *node.scrollable_overflow();
+        // Don't render things that are out of view. Ink overflow covers
+        // shadows, outlines and filters that reach past the boxes.
+        let ink = *node.ink_overflow();
         let transform = parent_style_transform
             * Affine::translate(box_position)
             * node.transform().as_deref().copied().unwrap_or_default();
@@ -442,7 +443,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             x: -self.initial_x,
             y: -self.initial_y,
         }) * transform;
-        let screen_bbox = screen_transform.transform_rect_bbox(overflow.union(border_box));
+        let screen_bbox = screen_transform.transform_rect_bbox(ink.union(border_box));
 
         // Cull elements that fall entirely outside the current clip rectangle. In addition to
         // the viewport, `clip_rect` is narrowed by any ancestor scrollport (see below), so this

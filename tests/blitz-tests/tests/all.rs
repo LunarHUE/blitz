@@ -28,6 +28,7 @@ mod fragment_navigation;
 mod harness_smoke;
 mod hover_dom_ancestors;
 mod incremental_oracle;
+mod ink_culling;
 mod inline_bfc_padding;
 mod inline_box_baseline;
 mod inline_box_scrollable_overflow;

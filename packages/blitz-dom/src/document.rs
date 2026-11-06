@@ -67,7 +67,7 @@ use style::{
 use style_dom::ElementState;
 use thin_vec::ThinVec;
 use url::Url;
-use web_time::Instant;
+use web_time::{Duration, Instant};
 
 #[cfg(feature = "parallel-construct")]
 use thread_local::ThreadLocal;
@@ -314,6 +314,10 @@ pub struct BaseDocument {
     /// The animation time the last resolve ran at, for a resolve that input
     /// asks for between frames.
     pub(crate) last_resolve_time: f64,
+    /// The work of the frame being prepared; see [`FrameTimings`].
+    pub(crate) frame_timings: FrameTimings,
+    frame_observers: Vec<(usize, Box<dyn FnMut(&FrameTimings) -> bool>)>,
+    next_frame_observer: usize,
     /// Whether resolve ends by re-resolving hover from the last pointer
     /// position. Off only for a resolve input asks for when that input
     /// reconciles hover itself, with its boundary events.
@@ -531,6 +535,9 @@ impl BaseDocument {
             focus_within_chain: Vec::new(),
             layout_stale: false,
             last_resolve_time: 0.0,
+            frame_timings: FrameTimings::default(),
+            frame_observers: Vec::new(),
+            next_frame_observer: 0,
             refresh_hover_on_resolve: true,
             active_node_id: None,
             mousedown_node_id: None,
@@ -2239,6 +2246,52 @@ impl BaseDocument {
             .and_then(|el| el.sub_doc_data_mut())
     }
 
+    /// The work done so far for the frame being prepared: every resolve
+    /// and diff since the last painted frame.
+    pub fn frame_timings(&self) -> FrameTimings {
+        self.frame_timings
+    }
+
+    /// Reports how long the embedder spent applying DOM changes, adding it
+    /// to the frame being prepared.
+    pub fn add_diff_timing(&mut self, diff: Duration) {
+        *self.frame_timings.diff.get_or_insert_default() += diff;
+    }
+
+    /// Ends the frame being prepared, reporting how long painting it took:
+    /// `record` for blitz-paint's traversal into the scene, `render` for
+    /// everything the renderer did with it (rasterizing, upload and
+    /// presentation). Frame observers run here, in the order they were
+    /// added, with the document borrowed; they must not reach for it. The
+    /// next frame starts empty. Returns the finished frame.
+    pub fn finish_frame(&mut self, record: Duration, render: Duration) -> FrameTimings {
+        let mut done = self.frame_timings;
+        done.record = Some(record);
+        done.render = Some(render);
+        self.frame_timings = FrameTimings {
+            frame: done.frame + 1,
+            ..FrameTimings::default()
+        };
+        self.frame_observers
+            .retain_mut(|(_, observer)| observer(&done));
+        done
+    }
+
+    /// Runs `observer` at the end of every painted frame, until it returns
+    /// false or is removed. Returning false lets an observer stop itself
+    /// when its owner couldn't remove it, such as while the document was
+    /// borrowed.
+    pub fn add_frame_observer(&mut self, observer: Box<dyn FnMut(&FrameTimings) -> bool>) -> usize {
+        self.next_frame_observer += 1;
+        let id = self.next_frame_observer;
+        self.frame_observers.push((id, observer));
+        id
+    }
+
+    pub fn remove_frame_observer(&mut self, id: usize) {
+        self.frame_observers.retain(|(i, _)| *i != id);
+    }
+
     pub fn is_animating(&self) -> bool {
         #[cfg(feature = "custom-widget")]
         let custom_widget_is_animating = self.custom_widget_nodes.iter().any(|&node_id| {
@@ -2970,6 +3023,33 @@ impl BaseDocument {
 
         ranges
     }
+}
+
+/// Durations of one frame's stages, for an embedder that measures them.
+/// A frame runs from one painted frame to the next: every resolve and diff
+/// in between adds to it, so a resolve that input asks for between frames
+/// is counted with the frame it leads to. Taking them costs a few clock
+/// reads per resolve and nothing else.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FrameTimings {
+    /// Counts painted frames; this frame's number.
+    pub frame: u64,
+    /// Resolves that ran for this frame.
+    pub resolves: u32,
+    /// Applying the embedder's DOM changes, as the embedder reported it.
+    pub diff: Option<Duration>,
+    /// Device changes and the Stylo traversal, over every resolve.
+    pub style: Duration,
+    /// Damage propagation, box construction, Taffy layout, transforms and
+    /// the paint tree, over every resolve.
+    pub layout: Duration,
+    /// blitz-paint's traversal into the renderer's scene, as the shell
+    /// reported it.
+    pub record: Option<Duration>,
+    /// What the renderer did with the scene after recording, as the shell
+    /// reported it. A frame the renderer drew but then failed to present
+    /// is reported like any other; the renderer API doesn't say.
+    pub render: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

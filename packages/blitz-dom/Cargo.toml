@@ -72,6 +72,7 @@ accesskit = { workspace = true, optional = true }
 parley = { workspace = true }
 unicode-segmentation = "1.13"
 skrifa = { workspace = true }
+bytemuck = { workspace = true }
 linebender_resource_handle = { workspace = true }
 color = { workspace = true }
 kurbo = { workspace = true }

@@ -129,6 +129,10 @@ pub struct LayoutData {
     pub final_layout: Layout,
     pub scroll_offset: crate::Point<f64>,
     pub scrollable_overflow: KurboRect,
+    /// Everything this node and its descendants may paint, in the same
+    /// coordinates as `scrollable_overflow`, which it contains. See
+    /// [`crate::layout::ink`].
+    pub ink_overflow: KurboRect,
     /// The writing mode this node's layout algorithm ran in (the root takes it from `<body>`),
     /// recorded by the layout pass for CSSOM geometry lookups.
     #[cfg(feature = "writing-mode")]
@@ -143,6 +147,7 @@ impl LayoutData {
             final_layout: Layout::new(),
             scroll_offset: crate::Point::ZERO,
             scrollable_overflow: KurboRect::ZERO,
+            ink_overflow: KurboRect::ZERO,
             #[cfg(feature = "writing-mode")]
             writing_mode: stylo_taffy::WritingMode::empty(),
         }
