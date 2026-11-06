@@ -21,7 +21,7 @@ use atomic_refcell::AtomicRefCell;
 use std::any::Any;
 use std::sync::Arc;
 use std::task::Waker;
-use web_time::Instant;
+use web_time::{Duration, Instant};
 use winit::event::ElementState;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Theme, WindowAttributes, WindowId};
@@ -350,17 +350,7 @@ impl<Rend: WindowRenderer> View<Rend> {
             height + insets.top + insets.bottom,
         );
 
-        self.renderer.render(|scene| {
-            paint_scene(
-                scene,
-                &mut inner,
-                scale,
-                width,
-                height,
-                insets.left,
-                insets.top,
-            )
-        });
+        paint_frame(&mut self.renderer, &mut inner, scale, width, height, insets);
         drop(inner);
         if changed {
             self.update_accessibility();
@@ -440,17 +430,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         let insets = self.safe_area_insets;
 
         if !is_blocked && is_visible {
-            self.renderer.render(|scene| {
-                paint_scene(
-                    scene,
-                    &mut inner,
-                    scale,
-                    width,
-                    height,
-                    insets.left,
-                    insets.top,
-                )
-            });
+            paint_frame(&mut self.renderer, &mut inner, scale, width, height, insets);
         }
 
         drop(inner);
@@ -892,6 +872,176 @@ fn poll_with_waker(doc: &mut dyn Document, waker: Option<&Waker>) -> bool {
         return false;
     };
     doc.poll(Some(std::task::Context::from_waker(waker)))
+}
+
+/// Paints `doc` through `renderer` and finishes the document's frame with
+/// the paint times, if the renderer drew it. Every paint of a window, the
+/// first after a resume included, goes through here, so each painted frame
+/// is reported once.
+fn paint_frame<R: WindowRenderer>(
+    renderer: &mut R,
+    doc: &mut blitz_dom::BaseDocument,
+    scale: f64,
+    width: u32,
+    height: u32,
+    insets: PhysicalInsets<u32>,
+) {
+    let mut clock = PaintClock::start();
+    renderer.render(|scene| {
+        clock.record(|| paint_scene(scene, doc, scale, width, height, insets.left, insets.top))
+    });
+    clock.finish(doc);
+}
+
+/// Times one frame's paint: the recording inside the renderer's drawing
+/// callback, and the rest of the renderer's work around it.
+struct PaintClock {
+    started: Instant,
+    record: Option<Duration>,
+}
+
+impl PaintClock {
+    fn start() -> Self {
+        PaintClock {
+            started: Instant::now(),
+            record: None,
+        }
+    }
+
+    /// Runs the recording, timed.
+    fn record<T>(&mut self, paint: impl FnOnce() -> T) -> T {
+        let painting = Instant::now();
+        let out = paint();
+        self.record = Some(painting.elapsed());
+        out
+    }
+
+    /// Finishes the document's frame with the paint times, if the renderer
+    /// called its drawing callback. A renderer that had nothing to draw
+    /// into, such as softbuffer without a buffer, returns without calling
+    /// it; that frame's work then counts toward the next painted one.
+    ///
+    /// The callback running is the only sign of success the shell gets:
+    /// anyrender's `WindowRenderer::render` returns nothing. Softbuffer
+    /// acquires its buffer before drawing and panics if presenting fails,
+    /// so with it a drawn frame was presented. A GPU renderer that draws
+    /// first and then fails to acquire or present its surface returns the
+    /// same way, and that frame is still reported as painted.
+    fn finish(self, doc: &mut blitz_dom::BaseDocument) {
+        if let Some(record) = self.record {
+            doc.finish_frame(record, self.started.elapsed().saturating_sub(record));
+        }
+    }
+}
+
+#[cfg(test)]
+mod paint_clock_tests {
+    use super::{PaintClock, paint_frame};
+    use anyrender::{RenderContext, WindowHandle, WindowRenderer};
+    use blitz_dom::{BaseDocument, DocumentConfig};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use winit::dpi::PhysicalInsets;
+
+    /// Draws into a recording, or, like a renderer without a surface,
+    /// returns without calling its drawing callback.
+    struct Fake {
+        draws: bool,
+    }
+
+    impl RenderContext for Fake {}
+
+    impl WindowRenderer for Fake {
+        type ScenePainter<'a> = anyrender::Scene;
+        fn resume<F: FnOnce() + 'static>(
+            &mut self,
+            _: Arc<dyn WindowHandle>,
+            _: u32,
+            _: u32,
+            ready: F,
+        ) {
+            ready();
+        }
+        fn complete_resume(&mut self) -> bool {
+            true
+        }
+        fn suspend(&mut self) {}
+        fn is_active(&self) -> bool {
+            true
+        }
+        fn set_size(&mut self, _: u32, _: u32) {}
+        fn render<F: FnOnce(&mut anyrender::Scene)>(&mut self, draw: F) {
+            if self.draws {
+                draw(&mut anyrender::Scene::new());
+            }
+        }
+    }
+
+    fn paint(renderer: &mut Fake, doc: &mut BaseDocument) {
+        paint_frame(
+            renderer,
+            doc,
+            1.0,
+            100,
+            100,
+            PhysicalInsets::new(0, 0, 0, 0),
+        );
+    }
+
+    #[test]
+    fn the_first_paint_and_one_after_a_resume_are_each_reported() {
+        // Startup and every resume paint through `paint_frame`, as redraw
+        // does.
+        let (mut doc, frames) = observed();
+        let mut renderer = Fake { draws: true };
+        paint(&mut renderer, &mut doc);
+        assert_eq!(frames.get(), 1, "the first frame");
+        renderer.suspend();
+        paint(&mut renderer, &mut doc);
+        assert_eq!(frames.get(), 2, "the frame after resuming");
+    }
+
+    #[test]
+    fn a_renderer_that_skips_drawing_reports_nothing() {
+        let (mut doc, frames) = observed();
+        paint(&mut Fake { draws: false }, &mut doc);
+        assert_eq!(frames.get(), 0);
+        paint(&mut Fake { draws: true }, &mut doc);
+        assert_eq!(frames.get(), 1);
+        assert_eq!(doc.frame_timings().frame, 1);
+    }
+
+    fn observed() -> (BaseDocument, Rc<Cell<usize>>) {
+        let mut doc = BaseDocument::new(DocumentConfig::default());
+        let frames = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&frames);
+        doc.add_frame_observer(Box::new(move |_| {
+            seen.set(seen.get() + 1);
+            true
+        }));
+        (doc, frames)
+    }
+
+    #[test]
+    fn a_frame_the_renderer_drew_is_finished() {
+        let (mut doc, frames) = observed();
+        let mut clock = PaintClock::start();
+        clock.record(|| ());
+        clock.finish(&mut doc);
+        assert_eq!(frames.get(), 1);
+        assert_eq!(doc.frame_timings().frame, 1);
+    }
+
+    #[test]
+    fn a_frame_the_renderer_skipped_stays_open() {
+        // A renderer without a buffer to draw into returns without calling
+        // its drawing callback, so nothing was recorded.
+        let (mut doc, frames) = observed();
+        PaintClock::start().finish(&mut doc);
+        assert_eq!(frames.get(), 0, "no observer hears of an unpainted frame");
+        assert_eq!(doc.frame_timings().frame, 0, "its work waits for the next");
+    }
 }
 
 #[cfg(test)]

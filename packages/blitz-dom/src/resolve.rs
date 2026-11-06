@@ -8,6 +8,7 @@ use kurbo::{Affine, Rect};
 use parley::LayoutContext;
 use selectors::Element as _;
 use style::dom::TDocument;
+use web_time::Instant;
 
 #[cfg(feature = "parallel-construct")]
 use rayon::prelude::*;
@@ -75,6 +76,7 @@ impl BaseDocument {
 
         let root_node_id = self.root_element().id;
         debug_timer!(timer, feature = "log-phase-times");
+        let started = Instant::now();
 
         // Apply any device changes (viewport resize, zoom, color-scheme, etc)
         // accumulated since the last resolve as a single device rebuild.
@@ -83,6 +85,7 @@ impl BaseDocument {
         // we need to resolve stylist first since it will need to drive our layout bits
         self.resolve_stylist(current_time_for_animations);
         timer.record_time("style");
+        let styled = Instant::now();
 
         // Non-incremental mode is "every node is damaged every frame": mark the
         // whole tree and let the same damage pipeline reconstruct and relayout
@@ -124,6 +127,10 @@ impl BaseDocument {
         self.build_paint_tree(root_node_id);
         timer.record_time("paint_tree");
         self.layout_stale = false;
+        let frame = &mut self.frame_timings;
+        frame.resolves += 1;
+        frame.style += styled - started;
+        frame.layout += styled.elapsed();
 
         // Clear all damage and dirty flags, walking only subtrees which are
         // marked as (potentially) containing damage.
@@ -464,5 +471,114 @@ impl BaseDocument {
 
         // println!("\n\n");
         // taffy::print_tree(self, root_node_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use blitz_traits::shell::{ColorScheme, Viewport};
+    use web_time::Duration;
+
+    use crate::{BaseDocument, DocumentConfig, qual_name};
+
+    fn document() -> BaseDocument {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html", html), vec![]);
+        let body = mutator.create_element(qual_name!("body", html), vec![]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        doc
+    }
+
+    #[test]
+    fn resolves_before_one_painted_frame_add_up_in_it() {
+        let mut doc = document();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&seen);
+        doc.add_frame_observer(Box::new(move |t| {
+            log.borrow_mut().push(*t);
+            true
+        }));
+
+        // Input asks for a resolve to hit-test, then the redraw resolves
+        // again before painting: both belong to the one painted frame.
+        doc.add_diff_timing(Duration::from_micros(3));
+        doc.resolve(0.0);
+        let first = doc.frame_timings();
+        doc.add_diff_timing(Duration::from_micros(4));
+        doc.resolve(0.0);
+        let both = doc.frame_timings();
+        assert_eq!(
+            both.diff,
+            Some(Duration::from_micros(7)),
+            "neither diff lost"
+        );
+        assert!(both.style > first.style && both.layout > first.layout);
+        assert_eq!(both.resolves, 2);
+
+        doc.finish_frame(Duration::from_micros(5), Duration::from_micros(6));
+        let reported = seen.borrow()[0];
+        assert_eq!(reported.diff, Some(Duration::from_micros(7)));
+        assert_eq!((reported.style, reported.layout), (both.style, both.layout));
+        assert_eq!(reported.resolves, 2);
+
+        // The next frame starts empty.
+        let next = doc.frame_timings();
+        assert_eq!(next.frame, reported.frame + 1);
+        assert_eq!((next.diff, next.resolves), (None, 0));
+        assert_eq!((next.style, next.layout), (Duration::ZERO, Duration::ZERO));
+    }
+
+    #[test]
+    fn an_observer_that_returns_false_is_dropped_after_that_frame() {
+        let mut doc = document();
+        let calls = Rc::new(RefCell::new(0));
+        let count = Rc::clone(&calls);
+        doc.add_frame_observer(Box::new(move |_| {
+            *count.borrow_mut() += 1;
+            false
+        }));
+        doc.finish_frame(Duration::ZERO, Duration::ZERO);
+        doc.finish_frame(Duration::ZERO, Duration::ZERO);
+        assert_eq!(*calls.borrow(), 1);
+        assert_eq!(Rc::strong_count(&calls), 1, "its captures went with it");
+    }
+
+    #[test]
+    fn a_painted_frame_reports_its_work_to_observers_until_removed() {
+        let mut doc = document();
+        assert_eq!(doc.frame_timings(), Default::default());
+
+        doc.add_diff_timing(Duration::from_micros(3));
+        doc.resolve(0.0);
+        let open = doc.frame_timings();
+        assert!(open.style > Duration::ZERO && open.layout > Duration::ZERO);
+        assert_eq!((open.record, open.render), (None, None), "not painted yet");
+
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&seen);
+        let id = doc.add_frame_observer(Box::new(move |t| {
+            log.borrow_mut().push(*t);
+            true
+        }));
+        let done = doc.finish_frame(Duration::from_micros(5), Duration::from_micros(6));
+        assert_eq!(done.record, Some(Duration::from_micros(5)));
+        assert_eq!(done.render, Some(Duration::from_micros(6)));
+        assert_eq!((done.diff, done.style), (open.diff, open.style));
+        assert_eq!(*seen.borrow(), [done], "observers see the finished frame");
+
+        doc.remove_frame_observer(id);
+        doc.resolve(0.0);
+        doc.finish_frame(Duration::ZERO, Duration::ZERO);
+        assert_eq!(seen.borrow().len(), 1, "removed");
     }
 }
