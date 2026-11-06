@@ -134,6 +134,11 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) simplify: Cell<Option<Simplify>>,
     /// What this pass simplified.
     pub(crate) stats: Cell<PaintStats>,
+    /// Whether an element being painted clips by more than the clip
+    /// rectangle passed down says: rounded corners, a turned edge,
+    /// `clip-path`, CSS `clip` or a mask. Simplified text needs its exact
+    /// clip, so under one it keeps its glyphs.
+    pub(crate) clip_inexact: Cell<bool>,
     /// Ink boxes of the inline layout being simplified, reused across layouts.
     pub(crate) ink_boxes: RefCell<Vec<(Rect, Color)>>,
 }
@@ -177,6 +182,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             simplify_attr: LocalName::from(SIMPLIFY_ATTR),
             simplify: Cell::new(None),
             stats: Cell::new(PaintStats::default()),
+            clip_inexact: Cell::new(false),
             ink_boxes: RefCell::new(Vec::new()),
         }
     }
@@ -521,6 +527,18 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         if css_clip_rect.is_some_and(|rect| rect.is_zero_area()) {
             return;
         }
+        // The clip rectangle passed down is exact only for a square-cornered
+        // overflow clip whose edges stay on the screen's axes.
+        let rounded_clip =
+            should_clip && cx.frame.border_radii != NonUniformRoundedRectRadii::default();
+        let turned_clip = should_clip && !crate::simplify::axis_aligned(transform);
+        let outer_clip_inexact = self.clip_inexact.replace(
+            self.clip_inexact.get()
+                || has_clip_path
+                || css_clip_rect.is_some()
+                || rounded_clip
+                || turned_clip,
+        );
         let css_clip_layer_pushed = self.layer_manager.maybe_push_layer(
             scene,
             css_clip_rect.is_some(),
@@ -546,6 +564,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 // If the element has a CSS `mask`, then push an isolation layer for the
                 // masked content. The mask is applied when the layer is popped below.
                 let mask_layer_pushed = cx.maybe_push_css_mask_layer(scene);
+                if mask_layer_pushed {
+                    self.clip_inexact.set(true);
+                }
                 // `cx.transform` is mutated to apply scroll offsets while drawing content.
                 // Save it so that the mask can be drawn untransformed by scroll offsets.
                 let unscrolled_transform = cx.transform;
@@ -664,6 +685,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         self.layer_manager
             .maybe_pop_layer(scene, css_clip_layer_pushed);
+        self.clip_inexact.set(outer_clip_inexact);
     }
 
     fn render_node(
@@ -979,6 +1001,7 @@ impl ElementCx<'_, '_> {
             // Render text, as ink boxes when it projects small under a hint
             if let Some(hint) = self.context.simplify.get().filter(|h| h.text > 0.0)
                 && ellipsis.is_none()
+                && !self.context.clip_inexact.get()
                 && crate::simplify::draw_ink_boxes(
                     scene,
                     &text_layout.layout,

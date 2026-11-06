@@ -408,3 +408,62 @@ fn rotated_text_keeps_its_glyphs() {
     assert_eq!(stats.text_boxes, 0);
     assert!(glyph_runs(&commands) > 0);
 }
+
+/// Whether the hint substitutes nothing in `body` and paints the same
+/// pixels as without it.
+fn keeps_full(body: &str) {
+    let (mut hinted, mut plain) = pair(body, "text=100");
+    let (_, stats) = record(&mut hinted);
+    assert_eq!(stats.text_boxes, 0, "{body}");
+    assert!(
+        pixels(&mut hinted) == pixels(&mut plain),
+        "the hint changed paint"
+    );
+}
+
+#[test]
+fn text_under_a_rounded_clip_keeps_its_glyphs() {
+    // Inside the clip's rectangle, but a box could fill a cut corner.
+    keeps_full(
+        r#"<div HINT style="width: 120px; height: 30px; overflow: hidden;
+                             border-radius: 15px">Short words</div>"#,
+    );
+}
+
+#[test]
+fn text_under_a_clip_path_keeps_its_glyphs() {
+    keeps_full(
+        r#"<div HINT style="width: 120px; height: 30px;
+                             clip-path: circle(20px at 30px 10px)">Short words</div>"#,
+    );
+}
+
+#[test]
+fn text_under_a_css_clip_keeps_its_glyphs() {
+    keeps_full(
+        r#"<div HINT style="position: absolute; left: 0; top: 0; width: 120px;
+                             height: 30px; clip: rect(0, 40px, 30px, 0)">Short words</div>"#,
+    );
+}
+
+#[test]
+fn text_under_a_rotated_clip_keeps_its_glyphs() {
+    // The clip turns with its element; the text is turned back, so only the
+    // clip's edges are slanted.
+    keeps_full(
+        r#"<div HINT style="position: absolute; left: 60px; top: 30px; width: 100px;
+                             height: 40px; overflow: hidden; transform: rotate(20deg)">
+            <div style="transform: rotate(-20deg)">Short words</div>
+        </div>"#,
+    );
+}
+
+#[test]
+fn a_clip_edge_between_two_words_keeps_their_glyphs() {
+    // The clip's right edge falls in the space between the words, which
+    // their run's box covers and their glyphs don't.
+    keeps_full(
+        r#"<div HINT style="width: 18px; height: 20px; overflow: hidden;
+                             white-space: nowrap; font: 12px monospace">ab cd</div>"#,
+    );
+}

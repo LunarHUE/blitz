@@ -12,8 +12,9 @@
 //! Decorations go with the glyphs; inline backgrounds and selection stay. A
 //! layout with `text-overflow`, a faux-italic run, a glyph whose outline
 //! can't be read, or a box crossing the clip rectangle around it keeps its
-//! glyphs. Clips other than that rectangle, such as `clip-path` or rounded
-//! overflow corners, aren't checked.
+//! glyphs, as does text under any clip that isn't an axis-aligned
+//! rectangle: rounded corners, a turned clip, `clip-path`, CSS `clip` or a
+//! mask.
 //!
 //! The box lies inside what the glyphs cover: it is the unhinted outlines'
 //! exact bounds, not grown for synthetic bold, and shrunk by half a device
@@ -179,10 +180,10 @@ pub(crate) fn draw_ink_boxes(
                 }
             }
             let on_screen = screen.transform_rect_bbox(ink);
-            if on_screen.x0 < clip.x0
-                || on_screen.y0 < clip.y0
-                || on_screen.x1 > clip.x1
-                || on_screen.y1 > clip.y1
+            if on_screen.x0 <= clip.x0
+                || on_screen.y0 <= clip.y0
+                || on_screen.x1 >= clip.x1
+                || on_screen.y1 >= clip.y1
             {
                 return false;
             }
