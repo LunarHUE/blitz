@@ -53,7 +53,9 @@ impl ElementCx<'_, '_> {
 
                     let alpha = shadow_color.components[3];
                     if alpha != 0.0 {
-                        let transform = self.transform.then_translate(Vec2 {
+                        // The offset is in the element's own coordinates, so
+                        // it scales and turns with the element's transforms.
+                        let transform = self.transform.pre_translate(Vec2 {
                             x: shadow.base.horizontal.px() as f64 * self.scale,
                             y: shadow.base.vertical.px() as f64 * self.scale,
                         });

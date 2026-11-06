@@ -139,3 +139,34 @@ fn a_far_element_is_still_culled() {
                outline: 4px solid #ff0000;'></div>";
     assert_eq!(count(far), count(""));
 }
+
+/// A 40x40 box with a red shadow 60px to its left, inside a 100x100
+/// wrapper transformed by `transform`.
+fn shadowed_under(transform: &str, left: i32) -> String {
+    format!(
+        "<div style='position:absolute; left:0px; top:0px; width:100px; height:100px; \
+         transform:{transform};'>\
+         <div style='position:absolute; left:{left}px; top:20px; width:40px; height:40px; \
+         box-shadow: -60px 0px 0px 0px #ff0000;'></div></div>"
+    )
+}
+
+#[test]
+fn a_shadow_under_a_scaled_ancestor_moves_with_the_scale() {
+    // The box is at 240..280 in the wrapper, 120..140 on screen; its
+    // shadow is at 180..220 in the wrapper, 90..110 on screen.
+    let mut doc = document(&shadowed_under(
+        "scale(0.5); transform-origin: 0px 0px",
+        240,
+    ));
+    assert!(is_red(pixel(&mut doc, 95, 20)));
+    assert!(!is_red(pixel(&mut doc, 70, 20)));
+}
+
+#[test]
+fn a_shadow_under_a_rotated_ancestor_turns_with_it() {
+    // Turned half way about the wrapper's center: the box at 110..150
+    // lands at -50..-10, its shadow at 50..90 lands at 10..50.
+    let mut doc = document(&shadowed_under("rotate(180deg)", 110));
+    assert!(is_red(pixel(&mut doc, 30, 60)));
+}
